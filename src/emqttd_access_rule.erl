@@ -1,45 +1,39 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc emqttd ACL Rule
-%%% 
-%%% @author Feng Lee <feng@emqtt.io>
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
+
 -module(emqttd_access_rule).
+
+-author("Feng Lee <feng@emqtt.io>").
 
 -include("emqttd.hrl").
 
--type who() :: all | binary() |
-               {ipaddr, esockd_access:cidr()} |
+
+-type(who() :: all | binary() |
+               {ipaddr, esockd_cidr:cidr_string()} |
                {client, binary()} |
-               {user, binary()}.
+               {user, binary()}).
 
--type access() :: subscribe | publish | pubsub.
+-type(access() :: subscribe | publish | pubsub).
 
--type topic() :: binary().
+-type(topic() :: binary()).
 
--type rule() :: {allow, all} |
+-type(rule() :: {allow, all} |
                 {allow, who(), access(), list(topic())} |
                 {deny, all} |
-                {deny, who(), access(), list(topic())}.
+                {deny, who(), access(), list(topic())}).
 
 -export_type([rule/0]).
 
@@ -47,10 +41,7 @@
 
 -define(ALLOW_DENY(A), ((A =:= allow) orelse (A =:= deny))).
 
-%%------------------------------------------------------------------------------
-%% @doc Compile access rule
-%% @end
-%%------------------------------------------------------------------------------
+%% @doc Compile Access Rule.
 compile({A, all}) when ?ALLOW_DENY(A) ->
     {A, all};
 
@@ -63,8 +54,7 @@ compile({A, Who, Access, TopicFilters}) when ?ALLOW_DENY(A) ->
 compile(who, all) ->
     all;
 compile(who, {ipaddr, CIDR}) ->
-    {Start, End} = esockd_access:range(CIDR),
-    {ipaddr, {CIDR, Start, End}};
+    {ipaddr, esockd_cidr:parse(CIDR, true)};
 compile(who, {client, all}) ->
     {client, all};
 compile(who, {client, ClientId}) ->
@@ -88,19 +78,16 @@ compile(topic, Topic) ->
     end.
 
 'pattern?'(Words) ->
-    lists:member(<<"$u">>, Words)
-        orelse lists:member(<<"$c">>, Words).
+    lists:member(<<"%u">>, Words)
+        orelse lists:member(<<"%c">>, Words).
 
 bin(L) when is_list(L) ->
     list_to_binary(L);
 bin(B) when is_binary(B) ->
     B.
 
-%%------------------------------------------------------------------------------
-%% @doc Match rule
-%% @end
-%%------------------------------------------------------------------------------
--spec match(mqtt_client(), topic(), rule()) -> {matched, allow} | {matched, deny} | nomatch.
+%% @doc Match Access Rule
+-spec(match(mqtt_client(), topic(), rule()) -> {matched, allow} | {matched, deny} | nomatch).
 match(_Client, _Topic, {AllowDeny, all}) when (AllowDeny =:= allow) orelse (AllowDeny =:= deny) ->
     {matched, AllowDeny};
 match(Client, Topic, {AllowDeny, Who, _PubSub, TopicFilters})
@@ -122,9 +109,8 @@ match_who(#mqtt_client{username = Username}, {user, Username}) ->
     true;
 match_who(#mqtt_client{peername = undefined}, {ipaddr, _Tup}) ->
     false;
-match_who(#mqtt_client{peername = {IP, _}}, {ipaddr, {_CDIR, Start, End}}) ->
-    I = esockd_access:atoi(IP),
-    I >= Start andalso I =< End;
+match_who(#mqtt_client{peername = {IP, _}}, {ipaddr, CIDR}) ->
+    esockd_cidr:match(IP, CIDR);
 match_who(Client, {'and', Conds}) when is_list(Conds) ->
     lists:foldl(fun(Who, Allow) ->
                   match_who(Client, Who) andalso Allow
@@ -159,13 +145,13 @@ feed_var(Client, Pattern) ->
     feed_var(Client, Pattern, []).
 feed_var(_Client, [], Acc) ->
     lists:reverse(Acc);
-feed_var(Client = #mqtt_client{client_id = undefined}, [<<"$c">>|Words], Acc) ->
-    feed_var(Client, Words, [<<"$c">>|Acc]);
-feed_var(Client = #mqtt_client{client_id = ClientId}, [<<"$c">>|Words], Acc) ->
+feed_var(Client = #mqtt_client{client_id = undefined}, [<<"%c">>|Words], Acc) ->
+    feed_var(Client, Words, [<<"%c">>|Acc]);
+feed_var(Client = #mqtt_client{client_id = ClientId}, [<<"%c">>|Words], Acc) ->
     feed_var(Client, Words, [ClientId |Acc]);
-feed_var(Client = #mqtt_client{username = undefined}, [<<"$u">>|Words], Acc) ->
-    feed_var(Client, Words, [<<"$u">>|Acc]);
-feed_var(Client = #mqtt_client{username = Username}, [<<"$u">>|Words], Acc) ->
+feed_var(Client = #mqtt_client{username = undefined}, [<<"%u">>|Words], Acc) ->
+    feed_var(Client, Words, [<<"%u">>|Acc]);
+feed_var(Client = #mqtt_client{username = Username}, [<<"%u">>|Words], Acc) ->
     feed_var(Client, Words, [Username|Acc]);
 feed_var(Client, [W|Words], Acc) ->
     feed_var(Client, Words, [W|Acc]).

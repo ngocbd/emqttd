@@ -1,167 +1,196 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc
-%%% MQTT Broker Header.
-%%%
-%%% @end
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
 
-%%------------------------------------------------------------------------------
+%%--------------------------------------------------------------------
 %% Banner
-%%------------------------------------------------------------------------------
--define(COPYRIGHT, "Copyright (C) 2012-2015, Feng Lee <feng@emqtt.io>").
+%%--------------------------------------------------------------------
 
--define(LICENSE_MESSAGE, "Licensed under MIT"). 
+-define(COPYRIGHT, "Copyright (c) 2013-2018 EMQ Enterprise, Inc.").
 
--define(PROTOCOL_VERSION, "MQTT/3.1.1").
+-define(LICENSE_MESSAGE, "Licensed under the Apache License, Version 2.0").
 
--define(ERTS_MINIMUM, "6.0").
+-define(PROTOCOL_VERSION, "MQTT/5.0").
 
-%% System Topics.
--define(SYSTOP, <<"$SYS">>).
+-define(ERTS_MINIMUM, "8.0").
 
-%% Queue Topics.
--define(QTop, <<"$Q">>).
+%%--------------------------------------------------------------------
+%% Sys/Queue/Share Topics' Prefix
+%%--------------------------------------------------------------------
 
-%%------------------------------------------------------------------------------
+-define(SYSTOP, <<"$SYS/">>).   %% System Topic
+
+-define(QUEUE,  <<"$queue/">>). %% Queue Topic
+
+-define(SHARE,  <<"$share/">>). %% Shared Topic
+
+%%--------------------------------------------------------------------
 %% PubSub
-%%------------------------------------------------------------------------------
--type pubsub() :: publish | subscribe.
+%%--------------------------------------------------------------------
 
--define(IS_PUBSUB(PS), (PS =:= publish orelse PS =:= subscribe)).
+-type(pubsub() :: publish | subscribe).
 
-%%------------------------------------------------------------------------------
+-define(PS(PS), (PS =:= publish orelse PS =:= subscribe)).
+
+%%--------------------------------------------------------------------
 %% MQTT Topic
-%%------------------------------------------------------------------------------
--record(mqtt_topic, {
-    topic   :: binary(),
-    node    :: node()
-}).
+%%--------------------------------------------------------------------
 
--type mqtt_topic() :: #mqtt_topic{}.
+-record(mqtt_topic,
+        { topic      :: binary(),
+          flags = [] :: [retained | static]
+        }).
 
-%%------------------------------------------------------------------------------
+-type(mqtt_topic() :: #mqtt_topic{}).
+
+%%--------------------------------------------------------------------
 %% MQTT Subscription
-%%------------------------------------------------------------------------------
--record(mqtt_subscription, {
-    subid   :: binary() | atom(),
-    topic   :: binary(),
-    qos = 0 :: 0 | 1 | 2
-}).
+%%--------------------------------------------------------------------
 
--type mqtt_subscription() :: #mqtt_subscription{}.
+-record(mqtt_subscription,
+        { subid :: binary() | atom(),
+          topic :: binary(),
+          qos   :: 0 | 1 | 2
+        }).
 
-%%------------------------------------------------------------------------------
+-type(mqtt_subscription() :: #mqtt_subscription{}).
+
+%%--------------------------------------------------------------------
 %% MQTT Client
-%%------------------------------------------------------------------------------
+%%--------------------------------------------------------------------
 
--type header_key() :: atom() | binary() | string().
--type header_val() :: atom() | binary() | string() | integer().
+-type(ws_header_key() :: atom() | binary() | string()).
+-type(ws_header_val() :: atom() | binary() | string() | integer()).
 
--record(mqtt_client, {
-    client_id     :: binary() | undefined,
-    client_pid    :: pid(),
-    username      :: binary() | undefined,
-    peername      :: {inet:ip_address(), integer()},
-    clean_sess    :: boolean(),
-    proto_ver     :: 3 | 4,
-    keepalive = 0,
-    will_topic    :: undefined | binary(),
-    ws_initial_headers :: list({header_key(), header_val()}),
-    connected_at  :: erlang:timestamp()
-}).
+-record(mqtt_client,
+        { client_id     :: binary() | undefined,
+          client_pid    :: pid(),
+          username      :: binary() | undefined,
+          peername      :: {inet:ip_address(), inet:port_number()},
+          clean_sess    :: boolean(),
+          proto_ver     :: 3 | 4,
+          keepalive = 0,
+          will_topic    :: undefined | binary(),
+          ws_initial_headers :: list({ws_header_key(), ws_header_val()}),
+          mountpoint    :: undefined | binary(),
+          connected_at  :: erlang:timestamp()
+        }).
 
--type mqtt_client() :: #mqtt_client{}.
+-type(mqtt_client() :: #mqtt_client{}).
 
-%%------------------------------------------------------------------------------
+%%--------------------------------------------------------------------
 %% MQTT Session
-%%------------------------------------------------------------------------------
--record(mqtt_session, {
-    client_id   :: binary(),
-    sess_pid    :: pid(),
-    persistent  :: boolean()
-}).
+%%--------------------------------------------------------------------
 
--type mqtt_session() :: #mqtt_session{}.
+-record(mqtt_session,
+        { client_id  :: binary(),
+          sess_pid   :: pid(),
+          clean_sess :: boolean()
+        }).
 
-%%------------------------------------------------------------------------------
+-type(mqtt_session() :: #mqtt_session{}).
+
+%%--------------------------------------------------------------------
 %% MQTT Message
-%%------------------------------------------------------------------------------
--type mqtt_msgid() :: binary() | undefined.
--type mqtt_pktid() :: 1..16#ffff | undefined.
+%%--------------------------------------------------------------------
 
--record(mqtt_message, {
-    msgid           :: mqtt_msgid(),      %% Global unique message ID
-    pktid           :: mqtt_pktid(),      %% PacketId
-    topic           :: binary(),          %% Topic that the message is published to
-    from            :: binary() | atom(), %% ClientId of publisher
-    qos    = 0      :: 0 | 1 | 2,         %% Message QoS
-    retain = false  :: boolean(),         %% Retain flag
-    dup    = false  :: boolean(),         %% Dup flag
-    sys    = false  :: boolean(),         %% $SYS flag
-    payload         :: binary(),          %% Payload
-    timestamp       :: erlang:timestamp() %% os:timestamp
-}).
+-type(mqtt_msg_id() :: binary() | undefined).
 
--type mqtt_message() :: #mqtt_message{}.
+-type(mqtt_pktid() :: 1..16#ffff | undefined).
 
-%%------------------------------------------------------------------------------
+-type(mqtt_msg_from() :: atom() | {binary(), undefined | binary()}).
+
+-record(mqtt_message,
+        { %% Global unique message ID
+          id              :: mqtt_msg_id(),
+          %% PacketId
+          pktid           :: mqtt_pktid(),
+          %% ClientId and Username
+          from            :: mqtt_msg_from(),
+          %% Topic that the message is published to
+          topic           :: binary(),
+          %% Message QoS
+          qos     = 0     :: 0 | 1 | 2,
+          %% Message Flags
+          flags   = []    :: [retain | dup | sys],
+          %% Retain flag
+          retain  = false :: boolean(),
+          %% Dup flag
+          dup     = false :: boolean(),
+          %% $SYS flag
+          sys     = false :: boolean(),
+          %% Headers
+          headers = []    :: list(),
+          %% Payload
+          payload         :: binary(),
+          %% Timestamp
+          timestamp       :: erlang:timestamp()
+        }).
+
+-type(mqtt_message() :: #mqtt_message{}).
+
+%%--------------------------------------------------------------------
+%% MQTT Delivery
+%%--------------------------------------------------------------------
+
+-record(mqtt_delivery,
+        { sender  :: pid(),          %% Pid of the sender/publisher
+          message :: mqtt_message(), %% Message
+          flows   :: list()
+        }).
+
+-type(mqtt_delivery() :: #mqtt_delivery{}).
+
+%%--------------------------------------------------------------------
+%% MQTT Route
+%%--------------------------------------------------------------------
+
+-record(mqtt_route,
+        { topic :: binary(),
+          node  :: node()
+        }).
+
+-type(mqtt_route() :: #mqtt_route{}).
+
+%%--------------------------------------------------------------------
 %% MQTT Alarm
-%%------------------------------------------------------------------------------
--record(mqtt_alarm, {
-    id          :: binary(),
-    severity    :: warning | error | critical,
-    title       :: binary(),
-    summary     :: binary(),
-    timestamp   :: erlang:timestamp() %% Timestamp
-}).
+%%--------------------------------------------------------------------
 
--type mqtt_alarm() :: #mqtt_alarm{}.
+-record(mqtt_alarm,
+        { id        :: binary(),
+          severity  :: warning | error | critical,
+          title     :: iolist() | binary(),
+          summary   :: iolist() | binary(),
+          timestamp :: erlang:timestamp()
+        }).
 
-%%------------------------------------------------------------------------------
+-type(mqtt_alarm() :: #mqtt_alarm{}).
+
+%%--------------------------------------------------------------------
 %% MQTT Plugin
-%%------------------------------------------------------------------------------
--record(mqtt_plugin, {
-    name,
-    version,
-    descr,
-    config,
-    active = false
-}).
+%%--------------------------------------------------------------------
 
--type mqtt_plugin() :: #mqtt_plugin{}.
+-record(mqtt_plugin, { name, version, descr, active = false }).
 
-%%------------------------------------------------------------------------------
-%% MQTT CLI Command
-%% For example: 'broker metrics'
-%%------------------------------------------------------------------------------
--record(mqtt_cli, {
-    name,
-    action,
-    args = [],
-    opts = [],
-    usage,
-    descr
-}).
+-type(mqtt_plugin() :: #mqtt_plugin{}).
 
--type mqtt_cli() :: #mqtt_cli{}.
+%%--------------------------------------------------------------------
+%% MQTT CLI Command. For example: 'broker metrics'
+%%--------------------------------------------------------------------
+
+-record(mqtt_cli, { name, action, args = [], opts = [], usage, descr }).
+
+-type(mqtt_cli() :: #mqtt_cli{}).
 

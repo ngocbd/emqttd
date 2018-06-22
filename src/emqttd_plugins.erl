@@ -1,31 +1,26 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc emqttd plugins.
-%%%
-%%% @author Feng Lee <feng@emqtt.io>
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
+
 -module(emqttd_plugins).
 
+-author("Feng Lee <feng@emqtt.io>").
+
 -include("emqttd.hrl").
+
+-export([init/0]).
 
 -export([load/0, unload/0]).
 
@@ -33,19 +28,38 @@
 
 -export([list/0]).
 
-%%------------------------------------------------------------------------------
+%% @doc Init plugins' config
+-spec(init() -> ok).
+init() ->
+    case emqttd:env(plugins_etc_dir) of
+        {ok, PluginsEtc} ->
+            CfgFiles = [filename:join(PluginsEtc, File) ||
+                          File <- filelib:wildcard("*.config", PluginsEtc)],
+            lists:foreach(fun init_config/1, CfgFiles);
+        undefined ->
+            ok
+    end.
+
+init_config(CfgFile) ->
+    {ok, [AppsEnv]} = file:consult(CfgFile),
+    lists:foreach(fun({AppName, Envs}) ->
+                      [application:set_env(AppName, Par, Val) || {Par, Val} <- Envs]
+                  end, AppsEnv).
+
 %% @doc Load all plugins when the broker started.
-%% @end
-%%------------------------------------------------------------------------------
--spec load() -> list() | {error, any()}.
+-spec(load() -> list() | {error, term()}).
 load() ->
-    case env(loaded_file) of
+    case emqttd:env(plugins_loaded_file) of
         {ok, File} ->
+            ensure_file(File),
             with_loaded_file(File, fun(Names) -> load_plugins(Names, false) end);
         undefined ->
             %% No plugins available
             ignore
     end.
+
+ensure_file(File) ->
+    case filelib:is_file(File) of false -> write_loaded([]); true -> ok end.
 
 with_loaded_file(File, SuccFun) ->
     case read_loaded(File) of
@@ -65,13 +79,10 @@ load_plugins(Names, Persistent) ->
     NeedToLoad = Names -- NotFound -- names(started_app),
     [load_plugin(find_plugin(Name, Plugins), Persistent) || Name <- NeedToLoad].
 
-%%------------------------------------------------------------------------------
 %% @doc Unload all plugins before broker stopped.
-%% @end
-%%------------------------------------------------------------------------------
--spec unload() -> list() | {error, any()}.
+-spec(unload() -> list() | {error, term()}).
 unload() ->
-    case env(loaded_file) of
+    case emqttd:env(plugins_loaded_file) of
         {ok, File} ->
             with_loaded_file(File, fun stop_plugins/1);
         undefined ->
@@ -82,16 +93,13 @@ unload() ->
 stop_plugins(Names) ->
     [stop_app(App) || App <- Names].
 
-%%------------------------------------------------------------------------------
 %% @doc List all available plugins
-%% @end
-%%------------------------------------------------------------------------------
--spec list() -> [mqtt_plugin()].
+-spec(list() -> [mqtt_plugin()]).
 list() ->
-    case env(plugins_dir) of
-        {ok, PluginsDir} -> 
-            AppFiles = filelib:wildcard("*/ebin/*.app", PluginsDir),
-            Plugins = [plugin(PluginsDir, AppFile) || AppFile <- AppFiles],
+    case emqttd:env(plugins_etc_dir) of
+        {ok, PluginsEtc} ->
+            CfgFiles = filelib:wildcard("*.{conf,config}", PluginsEtc),
+            Plugins = all_plugin_attrs(CfgFiles),
             StartedApps = names(started_app),
             lists:map(fun(Plugin = #mqtt_plugin{name = Name}) ->
                           case lists:member(Name, StartedApps) of
@@ -103,27 +111,27 @@ list() ->
             []
     end.
 
-plugin(PluginsDir, AppFile0) ->
-    AppFile = filename:join(PluginsDir, AppFile0),
-    {ok, [{application, Name, Attrs}]} = file:consult(AppFile),
-    CfgFile = filename:join([PluginsDir, Name, "etc/plugin.config"]),
-    AppsEnv1 =
-    case filelib:is_file(CfgFile) of
-        true ->
-            {ok, [AppsEnv]} = file:consult(CfgFile),
-            AppsEnv;
-        false ->
-            []
-    end,
-    Ver = proplists:get_value(vsn, Attrs, "0"),
-    Descr = proplists:get_value(description, Attrs, ""),
-    #mqtt_plugin{name = Name, version = Ver, config = AppsEnv1, descr = Descr}.
+all_plugin_attrs(CfgFiles) ->
+    lists:foldl(
+      fun(CfgFile, Acc) ->
+          case plugin(CfgFile) of
+              not_found -> Acc;
+              Attr -> Acc ++ [Attr]
+          end
+      end, [], CfgFiles).
 
-%%------------------------------------------------------------------------------
-%% @doc Load One Plugin
-%% @end
-%%------------------------------------------------------------------------------
--spec load(atom()) -> ok | {error, any()}.
+plugin(CfgFile) ->
+    AppName = app_name(CfgFile),
+    case application:get_all_key(AppName) of
+        {ok, Attrs} ->
+            Ver = proplists:get_value(vsn, Attrs, "0"),
+            Descr = proplists:get_value(description, Attrs, ""),
+            #mqtt_plugin{name = AppName, version = Ver, descr = Descr};
+        _ -> not_found
+    end.
+
+%% @doc Load a Plugin
+-spec(load(atom()) -> ok | {error, term()}).
 load(PluginName) when is_atom(PluginName) ->
     case lists:member(PluginName, names(started_app)) of
         true ->
@@ -139,36 +147,29 @@ load(PluginName) when is_atom(PluginName) ->
             end
     end.
 
-load_plugin(#mqtt_plugin{name = Name, config = Config}, Persistent) ->
-    case load_app(Name, Config) of
+load_plugin(#mqtt_plugin{name = Name}, Persistent) ->
+    case load_app(Name) of
         ok ->
             start_app(Name, fun(App) -> plugin_loaded(App, Persistent) end);
         {error, Error} ->
             {error, Error}
     end.
 
-load_app(App, Config) ->
+load_app(App) ->
     case application:load(App) of
         ok ->
-            set_config(Config);
+            ok;
         {error, {already_loaded, App}} ->
-            set_config(Config);
+            ok;
         {error, Error} ->
             {error, Error}
     end.
 
-%% This trick is awesome:)
-set_config([]) ->
-    ok;
-set_config([{AppName, Envs} | Config]) ->
-    [application:set_env(AppName, Par, Val) || {Par, Val} <- Envs],
-    set_config(Config).
-
 start_app(App, SuccFun) ->
     case application:ensure_all_started(App) of
         {ok, Started} ->
-            lager:info("started Apps: ~p", [Started]),
-            lager:info("load plugin ~p successfully", [App]),
+            lager:info("Started Apps: ~p", [Started]),
+            lager:info("Load plugin ~p successfully", [App]),
             SuccFun(App),
             {ok, Started};
         {error, {ErrApp, Reason}} ->
@@ -180,13 +181,10 @@ find_plugin(Name) ->
     find_plugin(Name, list()).
 
 find_plugin(Name, Plugins) ->
-    lists:keyfind(Name, 2, Plugins). 
+    lists:keyfind(Name, 2, Plugins).
 
-%%------------------------------------------------------------------------------
-%% @doc UnLoad One Plugin
-%% @end
-%%------------------------------------------------------------------------------
--spec unload(atom()) -> ok | {error, any()}.
+%% @doc UnLoad a Plugin
+-spec(unload(atom()) -> ok | {error, term()}).
 unload(PluginName) when is_atom(PluginName) ->
     case {lists:member(PluginName, names(started_app)), lists:member(PluginName, names(plugin))} of
         {true, true} ->
@@ -206,20 +204,23 @@ unload_plugin(App, Persistent) ->
         {error, Reason} ->
             {error, Reason}
     end.
-    
+
 stop_app(App) ->
     case application:stop(App) of
         ok ->
-            lager:info("stop plugin ~p successfully~n", [App]), ok;
+            lager:info("Stop plugin ~p successfully~n", [App]), ok;
         {error, {not_started, App}} ->
-            lager:error("plugin ~p is not started~n", [App]), ok;
+            lager:error("Plugin ~p is not started~n", [App]), ok;
         {error, Reason} ->
-            lager:error("stop plugin ~p error: ~p", [App]), {error, Reason}
+            lager:error("Stop plugin ~p error: ~p", [App]), {error, Reason}
     end.
 
-%%%=============================================================================
-%%% Internal functions
-%%%=============================================================================
+%%--------------------------------------------------------------------
+%% Internal functions
+%%--------------------------------------------------------------------
+
+app_name(File) ->
+    [AppName | _] = string:tokens(File, "."), list_to_atom(AppName).
 
 names(plugin) ->
     names(list());
@@ -262,14 +263,15 @@ plugin_unloaded(Name, true) ->
     end.
 
 read_loaded() ->
-    {ok, File} = env(loaded_file),
-    read_loaded(File). 
+    case emqttd:env(plugins_loaded_file) of
+        {ok, File} -> read_loaded(File);
+        undefined  -> {error, not_found}
+    end.
 
-read_loaded(File) ->
-    file:consult(File).
+read_loaded(File) -> file:consult(File).
 
 write_loaded(AppNames) ->
-    {ok, File} = env(loaded_file),
+    {ok, File} = emqttd:env(plugins_loaded_file),
     case file:open(File, [binary, write]) of
         {ok, Fd} ->
             lists:foreach(fun(Name) ->
@@ -279,17 +281,3 @@ write_loaded(AppNames) ->
             lager:error("Open File ~p Error: ~p", [File, Error]),
             {error, Error}
     end.
-
-env(Name) ->
-    case application:get_env(emqttd, plugins) of
-        {ok, PluginsEnv} ->
-            case proplists:get_value(Name, PluginsEnv) of
-                undefined ->
-                    undefined;
-                Val ->
-                    {ok, Val}
-            end;
-        undefined ->
-            undefined
-    end.
-

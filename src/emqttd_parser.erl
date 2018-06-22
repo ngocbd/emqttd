@@ -1,66 +1,51 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc MQTT Packet Parser
-%%%
-%%% @author Feng Lee <feng@emqtt.io>
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
+
+%% @doc MQTT Packet Parser
 -module(emqttd_parser).
+
+-author("Feng Lee <feng@emqtt.io>").
 
 -include("emqttd.hrl").
 
 -include("emqttd_protocol.hrl").
 
 %% API
--export([new/1, parse/2]).
+-export([initial_state/0, initial_state/1, parse/2]).
 
--record(mqtt_packet_limit, {max_packet_size}).
+-type(max_packet_size() :: 1..?MAX_PACKET_SIZE).
 
--type option() :: {atom(),  any()}.
+-spec(initial_state() -> {none, max_packet_size()}).
+initial_state() ->
+    initial_state(?MAX_PACKET_SIZE).
 
--type parser() :: fun( (binary()) -> any() ).
-
-%%------------------------------------------------------------------------------
 %% @doc Initialize a parser
-%% @end
-%%------------------------------------------------------------------------------
--spec new(Opts :: [option()]) -> parser().
-new(Opts) ->
-    fun(Bin) -> parse(Bin, {none, limit(Opts)}) end.
+-spec(initial_state(max_packet_size()) -> {none, max_packet_size()}).
+initial_state(MaxSize) ->
+    {none, MaxSize}.
 
-limit(Opts) ->
-    #mqtt_packet_limit{max_packet_size = 
-                        proplists:get_value(max_packet_size, Opts, ?MAX_LEN)}.
-
-%%------------------------------------------------------------------------------
 %% @doc Parse MQTT Packet
-%% @end
-%%------------------------------------------------------------------------------
--spec parse(binary(), {none, [option()]} | fun()) -> {ok, mqtt_packet()} | {error, any()} | {more, fun()}.
-parse(<<>>, {none, Limit}) ->
-    {more, fun(Bin) -> parse(Bin, {none, Limit}) end};
-parse(<<PacketType:4, Dup:1, QoS:2, Retain:1, Rest/binary>>, {none, Limit}) ->
-    parse_remaining_len(Rest, #mqtt_packet_header{type   = PacketType,
+-spec(parse(binary(), {none, pos_integer()} | fun())
+            -> {ok, mqtt_packet()} | {error, term()} | {more, fun()}).
+parse(<<>>, {none, MaxLen}) ->
+    {more, fun(Bin) -> parse(Bin, {none, MaxLen}) end};
+parse(<<Type:4, Dup:1, QoS:2, Retain:1, Rest/binary>>, {none, Limit}) ->
+    parse_remaining_len(Rest, #mqtt_packet_header{type   = Type,
                                                   dup    = bool(Dup),
-                                                  qos    = QoS,
+                                                  qos    = fixqos(Type, QoS),
                                                   retain = bool(Retain)}, Limit);
 parse(Bin, Cont) -> Cont(Bin).
 
@@ -69,14 +54,20 @@ parse_remaining_len(<<>>, Header, Limit) ->
 parse_remaining_len(Rest, Header, Limit) ->
     parse_remaining_len(Rest, Header, 1, 0, Limit).
 
-parse_remaining_len(_Bin, _Header, _Multiplier, Length, #mqtt_packet_limit{max_packet_size = MaxLen})
+parse_remaining_len(_Bin, _Header, _Multiplier, Length, MaxLen)
     when Length > MaxLen ->
     {error, invalid_mqtt_frame_len};
 parse_remaining_len(<<>>, Header, Multiplier, Length, Limit) ->
     {more, fun(Bin) -> parse_remaining_len(Bin, Header, Multiplier, Length, Limit) end};
+%% optimize: match PUBACK, PUBREC, PUBREL, PUBCOMP, UNSUBACK...
+parse_remaining_len(<<0:1, 2:7, Rest/binary>>, Header, 1, 0, _Limit) ->
+    parse_frame(Rest, Header, 2);
+%% optimize: match PINGREQ...
+parse_remaining_len(<<0:8, Rest/binary>>, Header, 1, 0, _Limit) ->
+    parse_frame(Rest, Header, 0);
 parse_remaining_len(<<1:1, Len:7, Rest/binary>>, Header, Multiplier, Value, Limit) ->
     parse_remaining_len(Rest, Header, Multiplier * ?HIGHBIT, Value + Len * Multiplier, Limit);
-parse_remaining_len(<<0:1, Len:7, Rest/binary>>, Header,  Multiplier, Value, #mqtt_packet_limit{max_packet_size = MaxLen}) ->
+parse_remaining_len(<<0:1, Len:7, Rest/binary>>, Header,  Multiplier, Value, MaxLen) ->
     FrameLen = Value + Len * Multiplier,
     if
         FrameLen > MaxLen -> {error, invalid_mqtt_frame_len};
@@ -87,13 +78,14 @@ parse_frame(Bin, #mqtt_packet_header{type = Type, qos  = Qos} = Header, Length) 
     case {Type, Bin} of
         {?CONNECT, <<FrameBin:Length/binary, Rest/binary>>} ->
             {ProtoName, Rest1} = parse_utf(FrameBin),
-            <<ProtoVersion : 8, Rest2/binary>> = Rest1,
+            %% Fix mosquitto bridge: 0x83, 0x84
+            <<BridgeTag:4, ProtoVersion:4, Rest2/binary>> = Rest1,
             <<UsernameFlag : 1,
               PasswordFlag : 1,
               WillRetain   : 1,
               WillQos      : 2,
               WillFlag     : 1,
-              CleanSession : 1,
+              CleanSess    : 1,
               _Reserved    : 1,
               KeepAlive    : 16/big,
               Rest3/binary>>   = Rest2,
@@ -111,13 +103,14 @@ parse_frame(Bin, #mqtt_packet_header{type = Type, qos  = Qos} = Header, Length) 
                            will_retain = bool(WillRetain),
                            will_qos    = WillQos,
                            will_flag   = bool(WillFlag),
-                           clean_sess  = bool(CleanSession),
+                           clean_sess  = bool(CleanSess),
                            keep_alive  = KeepAlive,
                            client_id   = ClientId,
                            will_topic  = WillTopic,
                            will_msg    = WillMsg,
                            username    = UserName,
-                           password    = PasssWord}, Rest);
+                           password    = PasssWord,
+                           is_bridge   = (BridgeTag =:= 8)}, Rest);
                false ->
                     {error, protocol_header_corrupt}
             end;
@@ -132,7 +125,7 @@ parse_frame(Bin, #mqtt_packet_header{type = Type, qos  = Qos} = Header, Length) 
                                       _ -> <<Id:16/big, R/binary>> = Rest1,
                                           {Id, R}
                                   end,
-            wrap(Header, #mqtt_packet_publish{topic_name = TopicName,
+            wrap(fixdup(Header), #mqtt_packet_publish{topic_name = TopicName,
                                               packet_id = PacketId},
                  Payload, Rest);
         {?PUBACK, <<FrameBin:Length/binary, Rest/binary>>} ->
@@ -142,14 +135,14 @@ parse_frame(Bin, #mqtt_packet_header{type = Type, qos  = Qos} = Header, Length) 
             <<PacketId:16/big>> = FrameBin,
             wrap(Header, #mqtt_packet_puback{packet_id = PacketId}, Rest);
         {?PUBREL, <<FrameBin:Length/binary, Rest/binary>>} ->
-            1 = Qos,
+            %% 1 = Qos,
             <<PacketId:16/big>> = FrameBin,
             wrap(Header, #mqtt_packet_puback{packet_id = PacketId}, Rest);
         {?PUBCOMP, <<FrameBin:Length/binary, Rest/binary>>} ->
             <<PacketId:16/big>> = FrameBin,
             wrap(Header, #mqtt_packet_puback{packet_id = PacketId}, Rest);
         {?SUBSCRIBE, <<FrameBin:Length/binary, Rest/binary>>} ->
-            1 = Qos,
+            %% 1 = Qos,
             <<PacketId:16/big, Rest1/binary>> = FrameBin,
             TopicTable = parse_topics(?SUBSCRIBE, Rest1, []),
             wrap(Header, #mqtt_packet_subscribe{packet_id   = PacketId,
@@ -159,7 +152,7 @@ parse_frame(Bin, #mqtt_packet_header{type = Type, qos  = Qos} = Header, Length) 
         %    wrap(Header, #mqtt_packet_suback{packet_id = PacketId,
         %                                     qos_table = parse_qos(Rest1, []) }, Rest);
         {?UNSUBSCRIBE, <<FrameBin:Length/binary, Rest/binary>>} ->
-            1 = Qos,
+            %% 1 = Qos,
             <<PacketId:16/big, Rest1/binary>> = FrameBin,
             Topics = parse_topics(?UNSUBSCRIBE, Rest1, []),
             wrap(Header, #mqtt_packet_unsubscribe{packet_id = PacketId,
@@ -224,3 +217,15 @@ bool(1) -> true.
 protocol_name_approved(Ver, Name) ->
     lists:member({Ver, Name}, ?PROTOCOL_NAMES).
 
+%% Fix Issue#575
+fixqos(?PUBREL, 0)      -> 1;
+fixqos(?SUBSCRIBE, 0)   -> 1;
+fixqos(?UNSUBSCRIBE, 0) -> 1;
+fixqos(_Type, QoS)      -> QoS.
+
+%% Fix Issue#1319
+fixdup(Header = #mqtt_packet_header{qos = ?QOS0, dup = true}) ->
+    Header#mqtt_packet_header{dup = false};
+fixdup(Header = #mqtt_packet_header{qos = ?QOS2, dup = true}) ->
+    Header#mqtt_packet_header{dup = false};
+fixdup(Header) -> Header.

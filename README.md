@@ -1,149 +1,121 @@
 
-## Overview [![Build Status](https://travis-ci.org/emqtt/emqttd.svg?branch=master)](https://travis-ci.org/emqtt/emqttd)  [![Join the chat at https://gitter.im/emqtt/emqttd](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/emqtt/emqttd?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+# *EMQ* - Erlang MQTT Broker
 
-emqttd is a massively scalable and clusterable MQTT V3.1/V3.1.1 broker written in Erlang/OTP. emqttd support both MQTT V3.1/V3.1.1 protocol specification with extended features.
+[![Build Status](https://travis-ci.org/emqtt/emqttd.svg?branch=master)](https://travis-ci.org/emqtt/emqttd)
 
-emqttd requires Erlang R17+ to build.
+*EMQ* (Erlang MQTT Broker) is a distributed, massively scalable, highly extensible MQTT message broker written in Erlang/OTP.
 
-**DON'T compile the broker with Erlang/OTP R18.0 which introduced a [binary memory leak](http://erlang.org/pipermail/erlang-questions/2015-September/086098.html).**
+*EMQ* is fully open source and licensed under the Apache Version 2.0. *EMQ* implements both MQTT V3.1 and V3.1.1 protocol specifications, and supports MQTT-SN, CoAP, WebSocket, STOMP and SockJS at the same time.
 
-Demo Server: tcp://t.emqtt.io:1883
+*EMQ* provides a scalable, reliable, enterprise-grade MQTT message Hub for IoT, M2M, Smart Hardware and Mobile Messaging Applications.
 
-Twitter: [@emqtt](https://twitter.com/emqtt)
+The 1.0 release of the EMQ broker has scaled to 1.3 million concurrent MQTT connections on a 12 Core, 32G CentOS server.
 
-## Goals
-
-emqttd is aimed to provide a solid, enterprise grade, extensible open-source MQTT broker for IoT, M2M and Mobile applications that need to support ten millions of concurrent MQTT clients.
-
-* Easy to install
-* Massively scalable
-* Easy to extend
-* Solid stable
+Please visit [emqtt.io](http://emqtt.io) for more service. Follow us on Twitter: [@emqtt](https://twitter.com/emqtt)
 
 ## Features
 
-* Full MQTT V3.1/V3.1.1 protocol specification support
-* QoS0, QoS1, QoS2 Publish and Subscribe
+* Full MQTT V3.1/V3.1.1 support
+* QoS0, QoS1, QoS2 Publish/Subscribe
 * Session Management and Offline Messages
-* Retained Messages Support
-* Last Will Message Support
-* TCP/SSL Connection Support
-* MQTT Over Websocket(SSL) Support
-* HTTP Publish API Support
-* [$SYS/brokers/#](https://github.com/emqtt/emqtt/wiki/$SYS-Topics-of-Broker) Support
-* Client Authentication with clientId, ipaddress
-* Client Authentication with username, password.
-* Client ACL control with ipaddress, clientid, username.
-* Cluster brokers on several servers.
-* [Bridge](https://github.com/emqtt/emqttd/wiki/Bridge) brokers locally or remotelly
-* 500K+ concurrent clients connections per server
-* Extensible architecture with Hooks, Modules and Plugins
+* Retained Message
+* Last Will Message
+* TCP/SSL Connection
+* MQTT Over WebSocket(SSL)
+* HTTP Publish API
+* MQTT-SN Protocol
+* STOMP protocol
+* STOMP over SockJS
+* $SYS/# Topics
+* ClientID Authentication
+* IpAddress Authentication
+* Username and Password Authentication
+* Access control based on IpAddress, ClientID, Username
+* JWT Authentication
+* LDAP Authentication/ACL
+* HTTP Authentication/ACL
+* MySQL Authentication/ACL
+* Redis Authentication/ACL
+* PostgreSQL Authentication/ACL
+* MongoDB Authentication/ACL
+* Cluster brokers on several nodes 
+* Bridge brokers locally or remotely
+* mosquitto, RSMB bridge
+* Extensible architecture with Hooks and Plugins
 * Passed eclipse paho interoperability tests
+* Local Subscription
+* Shared Subscription
+* Proxy Protocol V1/2
+* Lua Hook and Web Hook
+* LWM2M Prototol Support
 
-## Modules
+## Installation
 
-* [emqttd_auth_clientid](https://github.com/emqtt/emqttd/wiki/Authentication) - Authentication with ClientIds
-* [emqttd_auth_username](https://github.com/emqtt/emqttd/wiki/Authentication) - Authentication with Username and Password
-* [emqttd_auth_ldap](https://github.com/emqtt/emqttd/wiki/Authentication) - Authentication with LDAP
-* [emqttd_mod_presence](https://github.com/emqtt/emqttd/wiki/Presence) - Publish presence message to $SYS topics when client connected or disconnected
-* emqttd_mod_autosub - Subscribe topics when client connected
-* [emqttd_mod_rewrite](https://github.com/emqtt/emqttd/wiki/Rewrite) - Topics rewrite like HTTP rewrite module
+The *EMQ* broker is cross-platform, which can be deployed on Linux, Unix, Mac, Windows and even Raspberry Pi.
+
+Download the binary package for your platform from http://emqtt.io/downloads.
+
+Documentation on [emqtt.io/docs/v2/](http://emqtt.io/docs/v2/install.html), [docs.emqtt.com](http://docs.emqtt.com/en/latest/install.html) for installation and configuration guide.
+
+## Build From Source
+
+The *EMQ* broker requires Erlang/OTP R19+ to build since 2.1 release.
+
+```
+git clone https://github.com/emqtt/emq-relx.git
+
+cd emq-relx && make
+
+cd _rel/emqttd && ./bin/emqttd console
+```
 
 ## Plugins
 
-* [emqttd_plugin_template](https://github.com/emqtt/emqttd_plugin_template) - Plugin template and demo
-* [emqttd_dashboard](https://github.com/emqtt/emqttd_dashboard) - Web Dashboard
-* [emqttd_plugin_mysql](https://github.com/emqtt/emqttd_plugin_mysql) - Authentication with MySQL
-* [emqttd_plugin_pgsql](https://github.com/emqtt/emqttd_plugin_pgsql) - Authentication with PostgreSQL
-* [emqttd_plugin_kafka](https://github.com/emqtt/emqtt_kafka) - Publish MQTT Messages to Kafka
-* [emqttd_plugin_redis](https://github.com/emqtt/emqtt_redis) - Redis Plugin
-* [emqttd_stomp](https://github.com/emqtt/emqttd_stomp) - Stomp Protocol Plugin
-* [emqttd_sockjs](https://github.com/emqtt/emqttd_sockjs) - SockJS(Stomp) Plugin
-* [emqttd_recon](https://github.com/emqtt/emqttd_recon) - Recon Plugin
+The *EMQ* broker is highly extensible, with many hooks and plugins for customizing the authentication/ACL and integrating with other systems:
 
-## Dashboard
-
-The broker released a simple web dashboard in 0.10.0 version.
-
-Address: http://localhost:18083
-Username: admin
-Password: public
-
-## Design
-
-![emqttd architecture](http://emqtt.io/static/img/Architecture.png)
-
-## QuickStart
-
-Download binary packeges for linux, mac and freebsd from [http://emqtt.io/downloads](http://emqtt.io/downloads).
-
-For example:
-
-```sh
-unzip emqttd-ubuntu64-0.12.0-beta-20151008.zip && cd emqttd
-
-# start console
-./bin/emqttd console
-
-# start as daemon
-./bin/emqttd start
-
-# check status
-./bin/emqttd_ctl status
-
-# stop
-./bin/emqttd stop
-``` 
-
-Build from source:
-
-```
-git clone https://github.com/emqtt/emqttd.git
-
-cd emqttd && make && make dist
-```
-
-## GetStarted
-
-Read [emqtt wiki](https://github.com/emqtt/emqttd/wiki) for detailed installation and configuration guide.
-
-## Benchmark
-
-Benchmark 0.12.0-beta on a centos6 server with 8 Core, 32G memory from QingCloud:
-
-250K Connections, 250K Topics, 250K Subscriptions, 4K Qos1 Messages/Sec In, 20K Qos1 Messages/Sec Out, 8M+(bps) In, 40M+(bps) Out Traffic
-
-Consumed  about 3.6G memory and 400+% CPU.
-
-Benchmark Report: [benchmark for 0.12.0 release](https://github.com/emqtt/emqttd/wiki/benchmark-for-0.12.0-release)
+Plugin                                                                 | Description
+-----------------------------------------------------------------------|--------------------------------------
+[emq_plugin_template](https://github.com/emqtt/emq_plugin_template)    | Plugin template and demo
+[emq_dashboard](https://github.com/emqtt/emq_dashboard)                | Web Dashboard
+[emq_retainer](https://github.com/emqtt/emq-retainer)                  | Store MQTT Retained Messages
+[emq_modules](https://github.com/emqtt/emq-modules)                    | Presence, Subscription and Rewrite Modules
+[emq_auth_username](https://github.com/emqtt/emq_auth_username)        | Username/Password Authentication Plugin
+[emq_auth_clientid](https://github.com/emqtt/emq_auth_clientid)        | ClientId Authentication Plugin
+[emq_auth_mysql](https://github.com/emqtt/emq_auth_mysql)              | MySQL Authentication/ACL Plugin
+[emq_auth_pgsql](https://github.com/emqtt/emq_auth_pgsql)              | PostgreSQL Authentication/ACL Plugin
+[emq_auth_redis](https://github.com/emqtt/emq_auth_redis)              | Redis Authentication/ACL Plugin
+[emq_auth_mongo](https://github.com/emqtt/emq_auth_mongo)              | MongoDB Authentication/ACL Plugin
+[emq_auth_http](https://github.com/emqtt/emq_auth_http)                | Authentication/ACL by HTTP API
+[emq_auth_ldap](https://github.com/emqtt/emq_auth_ldap)                | LDAP Authentication Plugin
+[emq_auth_jwt](https://github.com/emqtt/emq-auth-jwt)                  | JWT Authentication Plugin
+[emq_web_hook](https://github.com/emqtt/emq-web-hook)                  | Web Hook Plugin
+[emq_lua_hook](https://github.com/emqtt/emq-lua-hook)                  | Lua Hook Plugin
+[emq_sn](https://github.com/emqtt/emq_sn)                              | MQTT-SN Protocol Plugin
+[emq_coap](https://github.com/emqtt/emq_coap)                          | CoAP Protocol Plugin
+[emq_stomp](https://github.com/emqtt/emq_stomp)                        | Stomp Protocol Plugin
+[emq_lwm2m](https://github.com/emqx/emqx-lwm2m)                        | LWM2M Prototol Plugin
+[emq_recon](https://github.com/emqtt/emq_recon)                        | Recon Plugin
+[emq_reloader](https://github.com/emqtt/emq_reloader)                  | Reloader Plugin
+[emq_sockjs](https://github.com/emqtt/emq_sockjs)                      | SockJS(Stomp) Plugin
 
 ## Supports
 
 * Twitter: [@emqtt](https://twitter.com/emqtt)
 * Homepage: http://emqtt.io
 * Downloads: http://emqtt.io/downloads
-* Wiki: https://github.com/emqtt/emqttd/wiki
+* Documentation: http://emqtt.io/docs/v2/
 * Forum: https://groups.google.com/d/forum/emqtt
 * Mailing List: <emqtt@googlegroups.com>
 * Issues: https://github.com/emqtt/emqttd/issues
 * QQ Group: 12222225
 
-## Contributors
+## Test Servers
 
-* [@callbay](https://github.com/callbay)
-* [@hejin1026](https://github.com/hejin1026)
-* [@desoulter](https://github.com/desoulter)
-* [@turtleDeng](https://github.com/turtleDeng)
-* [@Hades32](https://github.com/Hades32)
-* [@huangdan](https://github.com/huangdan)
-* [@phanimahesh](https://github.com/phanimahesh)
-* [@dvliman](https://github.com/dvliman)
+The **q.emqtt.com** hosts a public Four-Node *EMQ* cluster on [QingCloud](https://qingcloud.com):
 
-## Author
-
-Feng Lee <feng@emqtt.io>
+![qing_cluster](http://emqtt.io/static/img/public_cluster.png)
 
 ## License
 
-The MIT License (MIT)
+Apache License Version 2.0
 

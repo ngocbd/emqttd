@@ -1,28 +1,19 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc emqttd erlang vm.
-%%%
-%%% @author huangdan
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
+
 -module(emqttd_vm).
 
 -export([schedulers/0]).
@@ -161,13 +152,13 @@ schedulers() ->
     erlang:system_info(schedulers).
 
 microsecs() ->
-    {Mega, Sec, Micro} = erlang:now(),
+    {Mega, Sec, Micro} = os:timestamp(),
     (Mega * 1000000 + Sec) * 1000000 + Micro.
 
 loads() ->
-    [{load1,  ftos(cpu_sup:avg1()/256)},
-     {load5,  ftos(cpu_sup:avg5()/256)},
-     {load15, ftos(cpu_sup:avg15()/256)}].
+    [{load1,  ftos(avg1()/256)},
+     {load5,  ftos(avg5()/256)},
+     {load15, ftos(avg15()/256)}].
 
 get_system_info() ->
     [{Key, format_system_info(Key, get_system_info(Key))} || Key <- ?SYSTEM_INFO].
@@ -436,3 +427,27 @@ mapping([{owner, V}|Entries], Acc) when is_pid(V) ->
 mapping([{Key, Value}|Entries], Acc) ->
     mapping(Entries, [{Key, Value}|Acc]).
 
+avg1() ->
+   case cpu_sup:avg1() of
+        SystemLoad when is_integer(SystemLoad) ->
+            SystemLoad;
+        {error, Reason} ->
+            lager:error("Get the average system load in the last minute fail for ~p~n", [Reason]),
+            0.00
+    end.
+avg5() ->
+    case cpu_sup:avg5() of
+        SystemLoad when is_integer(SystemLoad) ->
+            SystemLoad;
+        {error, Reason} ->
+            lager:error("Get the average system load in the last 5 minutes fail for ~p~n", [Reason]),
+            0.00
+    end.
+avg15() ->
+    case cpu_sup:avg15() of
+        SystemLoad when is_integer(SystemLoad) ->
+            SystemLoad;
+        {error, Reason} ->
+            lager:error("Get the average system load in the last 15 minutes fail for ~p~n", [Reason]),
+            0.00
+    end.

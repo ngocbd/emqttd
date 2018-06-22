@@ -1,135 +1,181 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc emqttd main module.
-%%%
-%%% @author Feng Lee <feng@emqtt.io>
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
+
+%% @doc EMQ Main Module.
+
 -module(emqttd).
 
--export([start/0, env/1, env/2,
-         start_listeners/0, stop_listeners/0,
-         load_all_mods/0, is_mod_enabled/1,
-         is_running/1]).
+-author("Feng Lee <feng@emqtt.io>").
 
--define(MQTT_SOCKOPTS, [
-        binary,
-        {packet,    raw},
-        {reuseaddr, true},
-        {backlog,   512},
-        {nodelay,   true}]).
+-include("emqttd.hrl").
+
+-include("emqttd_protocol.hrl").
+
+-export([start/0, env/1, env/2, is_running/1, stop/0]).
+
+%% PubSub API
+-export([subscribe/1, subscribe/2, subscribe/3, publish/1,
+         unsubscribe/1, unsubscribe/2]).
+
+%% PubSub Management API
+-export([setqos/3, topics/0, subscriptions/1, subscribers/1, subscribed/2]).
+
+%% Hooks API
+-export([hook/4, hook/3, unhook/2, run_hooks/2, run_hooks/3]).
+
+%% Debug API
+-export([dump/0]).
+
+%% Shutdown and reboot
+-export([shutdown/0, shutdown/1, reboot/0]).
+
+-type(subid() :: binary()).
+
+-type(subscriber() :: pid() | subid() | {subid(), pid()}).
+
+-type(suboption() :: local | {qos, non_neg_integer()} | {share, {'$queue' | binary()}}).
+
+-export_type([subscriber/0, suboption/0]).
 
 -define(APP, ?MODULE).
 
--type listener() :: {atom(), inet:port_number(), [esockd:option()]}.
+%%--------------------------------------------------------------------
+%% Bootstrap, environment, configuration, is_running...
+%%--------------------------------------------------------------------
 
-%%------------------------------------------------------------------------------
 %% @doc Start emqttd application.
-%% @end
-%%------------------------------------------------------------------------------
--spec start() -> ok | {error, any()}.
-start() ->
-    application:start(?APP).
+-spec(start() -> ok | {error, term()}).
+start() -> application:start(?APP).
 
-%%------------------------------------------------------------------------------
+%% @doc Stop emqttd application.
+-spec(stop() -> ok | {error, term()}).
+stop() -> application:stop(?APP).
+
+%% @doc Environment
+-spec(env(Key :: atom()) -> {ok, any()} | undefined).
+env(Key) -> application:get_env(?APP, Key).
+
 %% @doc Get environment
-%% @end
-%%------------------------------------------------------------------------------
--spec env(atom()) -> list().
-env(Group) ->
-    application:get_env(?APP, Group, []).
+-spec(env(Key :: atom(), Default :: any()) -> undefined | any()).
+env(Key, Default) -> application:get_env(?APP, Key, Default).
 
--spec env(atom(), atom()) -> undefined | any().
-env(Group, Name) ->
-    proplists:get_value(Name, env(Group)).
-
-%%------------------------------------------------------------------------------
-%% @doc Start Listeners
-%% @end
-%%------------------------------------------------------------------------------
--spec start_listeners() -> any().
-start_listeners() ->
-    {ok, Listeners} = application:get_env(?APP, listeners),
-    lists:foreach(fun start_listener/1, Listeners).
-
-%% Start mqtt listener
--spec start_listener(listener()) -> any().
-start_listener({mqtt, Port, Options}) ->
-    start_listener(mqtt, Port, Options);
-
-%% Start mqtt(SSL) listener
-start_listener({mqtts, Port, Options}) ->
-    start_listener(mqtts, Port, Options);
-
-%% Start http listener
-start_listener({http, Port, Options}) ->
-    MFArgs = {emqttd_http, handle_request, []},
-    mochiweb:start_http(Port, Options, MFArgs);
-
-%% Start https listener
-start_listener({https, Port, Options}) ->
-    MFArgs = {emqttd_http, handle_request, []},
-    mochiweb:start_http(Port, Options, MFArgs).
-
-start_listener(Protocol, Port, Options) ->
-    MFArgs = {emqttd_client, start_link, [env(mqtt)]},
-    esockd:open(Protocol, Port, merge_sockopts(Options) , MFArgs).
-
-merge_sockopts(Options) ->
-    SockOpts = emqttd_opts:merge(?MQTT_SOCKOPTS,
-                                 proplists:get_value(sockopts, Options, [])),
-    emqttd_opts:merge(Options, [{sockopts, SockOpts}]).
-
-%%------------------------------------------------------------------------------
-%% @doc Stop Listeners
-%% @end
-%%------------------------------------------------------------------------------
-stop_listeners() ->
-    {ok, Listeners} = application:get_env(?APP, listeners),
-    lists:foreach(fun stop_listener/1, Listeners).
-
-stop_listener({Protocol, Port, _Options}) ->
-    esockd:close({Protocol, Port}).
-
-load_all_mods() ->
-    lists:foreach(fun load_mod/1, env(modules)).
-
-load_mod({Name, Opts}) ->
-    Mod = list_to_atom("emqttd_mod_" ++ atom_to_list(Name)),
-    case catch Mod:load(Opts) of
-        {ok, _State}     -> lager:info("load module ~s successfully", [Name]);
-        {'EXIT', Reason} -> lager:error("load module ~s error: ~p", [Name, Reason])
-    end.
-
-is_mod_enabled(Name) ->
-    env(modules, Name) =/= undefined.
-
-%%------------------------------------------------------------------------------
 %% @doc Is running?
-%% @end
-%%------------------------------------------------------------------------------
+-spec(is_running(node()) -> boolean()).
 is_running(Node) ->
     case rpc:call(Node, erlang, whereis, [?APP]) of
         {badrpc, _}          -> false;
         undefined            -> false;
         Pid when is_pid(Pid) -> true
     end.
+
+%%--------------------------------------------------------------------
+%% PubSub APIs
+%%--------------------------------------------------------------------
+
+%% @doc Subscribe
+-spec(subscribe(iodata()) -> ok | {error, term()}).
+subscribe(Topic) ->
+    emqttd_server:subscribe(iolist_to_binary(Topic)).
+
+-spec(subscribe(iodata(), subscriber()) -> ok | {error, term()}).
+subscribe(Topic, Subscriber) ->
+    emqttd_server:subscribe(iolist_to_binary(Topic), Subscriber).
+
+-spec(subscribe(iodata(), subscriber(), [suboption()]) -> ok | {error, term()}).
+subscribe(Topic, Subscriber, Options) ->
+    emqttd_server:subscribe(iolist_to_binary(Topic), Subscriber, Options).
+
+%% @doc Publish MQTT Message
+-spec(publish(mqtt_message()) -> {ok, mqtt_delivery()} | ignore).
+publish(Msg) ->
+    emqttd_server:publish(Msg).
+
+%% @doc Unsubscribe
+-spec(unsubscribe(iodata()) -> ok | {error, term()}).
+unsubscribe(Topic) ->
+    emqttd_server:unsubscribe(iolist_to_binary(Topic)).
+
+-spec(unsubscribe(iodata(), subscriber()) -> ok | {error, term()}).
+unsubscribe(Topic, Subscriber) ->
+    emqttd_server:unsubscribe(iolist_to_binary(Topic), Subscriber).
+
+-spec(setqos(binary(), subscriber(), mqtt_qos()) -> ok).
+setqos(Topic, Subscriber, Qos) ->
+    emqttd_server:setqos(iolist_to_binary(Topic), Subscriber, Qos).
+
+-spec(topics() -> [binary()]).
+topics() -> emqttd_router:topics().
+
+-spec(subscribers(iodata()) -> list(subscriber())).
+subscribers(Topic) ->
+    emqttd_server:subscribers(iolist_to_binary(Topic)).
+
+-spec(subscriptions(subscriber()) -> [{emqttd:subscriber(), binary(), list(emqttd:suboption())}]).
+subscriptions(Subscriber) ->
+    emqttd_server:subscriptions(Subscriber).
+
+-spec(subscribed(iodata(), subscriber()) -> boolean()).
+subscribed(Topic, Subscriber) ->
+    emqttd_server:subscribed(iolist_to_binary(Topic), Subscriber).
+
+%%--------------------------------------------------------------------
+%% Hooks API
+%%--------------------------------------------------------------------
+
+-spec(hook(atom(), function() | {emqttd_hooks:hooktag(), function()}, list(any()))
+      -> ok | {error, term()}).
+hook(Hook, TagFunction, InitArgs) ->
+    emqttd_hooks:add(Hook, TagFunction, InitArgs).
+
+-spec(hook(atom(), function() | {emqttd_hooks:hooktag(), function()}, list(any()), integer())
+      -> ok | {error, term()}).
+hook(Hook, TagFunction, InitArgs, Priority) ->
+    emqttd_hooks:add(Hook, TagFunction, InitArgs, Priority).
+
+-spec(unhook(atom(), function() | {emqttd_hooks:hooktag(), function()})
+      -> ok | {error, term()}).
+unhook(Hook, TagFunction) ->
+    emqttd_hooks:delete(Hook, TagFunction).
+
+-spec(run_hooks(atom(), list(any())) -> ok | stop).
+run_hooks(Hook, Args) ->
+    emqttd_hooks:run(Hook, Args).
+
+-spec(run_hooks(atom(), list(any()), any()) -> {ok | stop, any()}).
+run_hooks(Hook, Args, Acc) ->
+    emqttd_hooks:run(Hook, Args, Acc).
+
+%%--------------------------------------------------------------------
+%% Shutdown and reboot
+%%--------------------------------------------------------------------
+
+shutdown() ->
+    shutdown(normal).
+
+shutdown(Reason) ->
+    lager:error("EMQ shutdown for ~s", [Reason]),
+    emqttd_plugins:unload(),
+    lists:foreach(fun application:stop/1, [emqttd, ekka, mochiweb, esockd, gproc]).
+
+reboot() ->
+    lists:foreach(fun application:start/1, [gproc, esockd, mochiweb, ekka, emqttd]).
+
+%%--------------------------------------------------------------------
+%% Debug
+%%--------------------------------------------------------------------
+
+dump() -> lists:append([emqttd_server:dump(), emqttd_router:dump()]).
 

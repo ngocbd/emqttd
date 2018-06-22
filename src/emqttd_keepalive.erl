@@ -1,56 +1,49 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc client keepalive
-%%%
-%%% @author Feng Lee <feng@emqtt.io>
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
+
+%% @doc Client Keepalive
+
 -module(emqttd_keepalive).
+
+-author("Feng Lee <feng@emqtt.io>").
 
 -export([start/3, check/1, cancel/1]).
 
--record(keepalive, {statfun, statval,
-                    tsec, tmsg, tref,
-                    repeat = 0}).
+-record(keepalive, {statfun, statval, tsec, tmsg, tref, repeat = 0}).
 
--type keepalive() :: #keepalive{}.
+-type(keepalive() :: #keepalive{}).
 
-%%------------------------------------------------------------------------------
+-export_type([keepalive/0]).
+
 %% @doc Start a keepalive
-%% @end
-%%------------------------------------------------------------------------------
--spec start(fun(), integer(), any()) -> undefined | keepalive().
+-spec(start(fun(), integer(), any()) -> {ok, keepalive()} | {error, term()}).
 start(_, 0, _) ->
-    undefined;
+    {ok, #keepalive{}};
 start(StatFun, TimeoutSec, TimeoutMsg) ->
-    {ok, StatVal} = StatFun(),
-    #keepalive{statfun = StatFun, statval = StatVal,
-               tsec = TimeoutSec, tmsg = TimeoutMsg,
-               tref = timer(TimeoutSec, TimeoutMsg)}.
+    case StatFun() of
+        {ok, StatVal} ->
+            {ok, #keepalive{statfun = StatFun, statval = StatVal,
+                            tsec = TimeoutSec, tmsg = TimeoutMsg,
+                            tref = timer(TimeoutSec, TimeoutMsg)}};
+        {error, Error} ->
+            {error, Error}
+    end.
 
-%%------------------------------------------------------------------------------
 %% @doc Check keepalive, called when timeout.
-%% @end
-%%------------------------------------------------------------------------------
--spec check(keepalive()) -> {ok, keepalive()} | {error, any()}.
+-spec(check(keepalive()) -> {ok, keepalive()} | {error, term()}).
 check(KeepAlive = #keepalive{statfun = StatFun, statval = LastVal, repeat = Repeat}) ->
     case StatFun() of
         {ok, NewVal} ->
@@ -68,17 +61,12 @@ check(KeepAlive = #keepalive{statfun = StatFun, statval = LastVal, repeat = Repe
 resume(KeepAlive = #keepalive{tsec = TimeoutSec, tmsg = TimeoutMsg}) ->
     KeepAlive#keepalive{tref = timer(TimeoutSec, TimeoutMsg)}.
 
-%%------------------------------------------------------------------------------
 %% @doc Cancel Keepalive
-%% @end
-%%------------------------------------------------------------------------------
--spec cancel(keepalive()) -> ok.
-cancel(#keepalive{tref = TRef}) ->
-    cancel(TRef);
-cancel(undefined) -> 
-    ok;
-cancel(TRef) ->
-    catch erlang:cancel_timer(TRef).
+-spec(cancel(keepalive()) -> ok).
+cancel(#keepalive{tref = TRef}) when is_reference(TRef) ->
+    catch erlang:cancel_timer(TRef), ok;
+cancel(_) ->
+    ok.
 
 timer(Sec, Msg) ->
     erlang:send_after(timer:seconds(Sec), self(), Msg).

@@ -1,55 +1,52 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc emqttd statistics
-%%%
-%%% @author Feng Lee <feng@emqtt.io>
-%%%-----------------------------------------------------------------------------
--module(emqttd_stats).
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
 
--include("emqttd.hrl").
+-module(emqttd_stats).
 
 -behaviour(gen_server).
 
--define(SERVER, ?MODULE).
+-author("Feng Lee <feng@emqtt.io>").
+
+-include("emqttd.hrl").
 
 -export([start_link/0, stop/0]).
 
-%% statistics API.
--export([statsfun/1, statsfun/2,
-         getstats/0, getstat/1,
-         setstat/2, setstats/3]).
+%% Client and Session Stats
+-export([set_client_stats/2, get_client_stats/1, del_client_stats/1,
+         set_session_stats/2, get_session_stats/1, del_session_stats/1]).
+
+%% Statistics API.
+-export([statsfun/1, statsfun/2, getstats/0, getstat/1, setstat/2, setstats/3]).
 
 %% gen_server Function Exports
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
--record(state, {tick_tref}).
+-record(state, {tick}).
+
+-type(stats() :: list({atom(), non_neg_integer()})).
 
 -define(STATS_TAB, mqtt_stats).
+-define(CLIENT_STATS_TAB, mqtt_client_stats).
+-define(SESSION_STATS_TAB, mqtt_session_stats).
 
 %% $SYS Topics for Clients
 -define(SYSTOP_CLIENTS, [
-    'clients/count',    % clients connected current
-    'clients/max'       % max clients connected
+    'clients/count', % clients connected current
+    'clients/max'    % max clients connected
 ]).
 
 %% $SYS Topics for Sessions
@@ -60,14 +57,14 @@
 
 %% $SYS Topics for Subscribers
 -define(SYSTOP_PUBSUB, [
-    'routes/count',      % ...
-    'routes/reverse',    % ...
-    'topics/count',      % ...
-    'topics/max',        % ...
+    'topics/count',        % ...
+    'topics/max',          % ...
+    'subscribers/count',   % ...
+    'subscribers/max',     % ...
     'subscriptions/count', % ...
     'subscriptions/max',   % ...
-    'queues/count',      % ...
-    'queues/max'         % ...
+    'routes/count',        % ...
+    'routes/max'           % ...
 ]).
 
 %% $SYS Topic for retained
@@ -76,81 +73,94 @@
     'retained/max'
 ]).
 
-%%%=============================================================================
-%%% API
-%%%=============================================================================
+%%--------------------------------------------------------------------
+%% API
+%%--------------------------------------------------------------------
 
-%%------------------------------------------------------------------------------
 %% @doc Start stats server
-%% @end
-%%------------------------------------------------------------------------------
--spec start_link() -> {ok, pid()} | ignore | {error, term()}.
+-spec(start_link() -> {ok, pid()} | ignore | {error, term()}).
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 stop() ->
-    gen_server:call(?SERVER, stop).
+    gen_server:call(?MODULE, stop).
 
-%%------------------------------------------------------------------------------
+-spec(set_client_stats(binary(), stats()) -> true).
+set_client_stats(ClientId, Stats) ->
+    ets:insert(?CLIENT_STATS_TAB, {ClientId, [{'$ts', emqttd_time:now_secs()}|Stats]}).
+
+-spec(get_client_stats(binary()) -> stats()).
+get_client_stats(ClientId) ->
+    case ets:lookup(?CLIENT_STATS_TAB, ClientId) of
+        [{_, Stats}] -> Stats;
+        [] -> []
+    end.
+
+-spec(del_client_stats(binary()) -> true).
+del_client_stats(ClientId) ->
+    ets:delete(?CLIENT_STATS_TAB, ClientId).
+
+-spec(set_session_stats(binary(), stats()) -> true).
+set_session_stats(ClientId, Stats) ->
+    ets:insert(?SESSION_STATS_TAB, {ClientId, [{'$ts', emqttd_time:now_secs()}|Stats]}).
+
+-spec(get_session_stats(binary()) -> stats()).
+get_session_stats(ClientId) ->
+    case ets:lookup(?SESSION_STATS_TAB, ClientId) of
+        [{_, Stats}] -> Stats;
+        [] -> []
+    end.
+
+-spec(del_session_stats(binary()) -> true).
+del_session_stats(ClientId) ->
+    ets:delete(?SESSION_STATS_TAB, ClientId).
+
 %% @doc Generate stats fun
-%% @end
-%%------------------------------------------------------------------------------
--spec statsfun(Stat :: atom()) -> fun().
+-spec(statsfun(Stat :: atom()) -> fun()).
 statsfun(Stat) ->
     fun(Val) -> setstat(Stat, Val) end.
     
--spec statsfun(Stat :: atom(), MaxStat :: atom()) -> fun().
+-spec(statsfun(Stat :: atom(), MaxStat :: atom()) -> fun()).
 statsfun(Stat, MaxStat) -> 
     fun(Val) -> setstats(Stat, MaxStat, Val) end.
 
-%%------------------------------------------------------------------------------
 %% @doc Get broker statistics
-%% @end
-%%------------------------------------------------------------------------------
--spec getstats() -> [{atom(), non_neg_integer()}].
+-spec(getstats() -> [{atom(), non_neg_integer()}]).
 getstats() ->
     lists:sort(ets:tab2list(?STATS_TAB)).
 
-%%------------------------------------------------------------------------------
 %% @doc Get stats by name
-%% @end
-%%------------------------------------------------------------------------------
--spec getstat(atom()) -> non_neg_integer() | undefined.
+-spec(getstat(atom()) -> non_neg_integer() | undefined).
 getstat(Name) ->
     case ets:lookup(?STATS_TAB, Name) of
         [{Name, Val}] -> Val;
         [] -> undefined
     end.
 
-%%------------------------------------------------------------------------------
 %% @doc Set broker stats
-%% @end
-%%------------------------------------------------------------------------------
--spec setstat(Stat :: atom(), Val :: pos_integer()) -> boolean().
+-spec(setstat(Stat :: atom(), Val :: pos_integer()) -> boolean()).
 setstat(Stat, Val) ->
     ets:update_element(?STATS_TAB, Stat, {2, Val}).
 
-%%------------------------------------------------------------------------------
 %% @doc Set stats with max
-%% @end
-%%------------------------------------------------------------------------------
--spec setstats(Stat :: atom(), MaxStat :: atom(), Val :: pos_integer()) -> boolean().
+-spec(setstats(Stat :: atom(), MaxStat :: atom(), Val :: pos_integer()) -> ok).
 setstats(Stat, MaxStat, Val) ->
     gen_server:cast(?MODULE, {setstats, Stat, MaxStat, Val}).
 
-%%%=============================================================================
-%%% gen_server callbacks
-%%%=============================================================================
+%%--------------------------------------------------------------------
+%% gen_server callbacks
+%%--------------------------------------------------------------------
 
 init([]) ->
-    random:seed(os:timestamp()),
-    ets:new(?STATS_TAB, [set, public, named_table, {write_concurrency, true}]),
+    emqttd_time:seed(),
+    lists:foreach(
+      fun(Tab) ->
+        Tab = ets:new(Tab, [set, public, named_table, {write_concurrency, true}])
+      end, [?STATS_TAB, ?CLIENT_STATS_TAB, ?SESSION_STATS_TAB]),
     Topics = ?SYSTOP_CLIENTS ++ ?SYSTOP_SESSIONS ++ ?SYSTOP_PUBSUB ++ ?SYSTOP_RETAINED,
     ets:insert(?STATS_TAB, [{Topic, 0} || Topic <- Topics]),
-    % Create $SYS Topics
-    [ok = emqttd_pubsub:create(topic, stats_topic(Topic)) || Topic <- Topics],
     % Tick to publish stats
-    {ok, #state{tick_tref = emqttd_broker:start_tick(tick)}, hibernate}.
+    {ok, #state{tick = emqttd_broker:start_tick(tick)}, hibernate}.
 
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
@@ -180,20 +190,22 @@ handle_info(tick, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{tick_tref = TRef}) ->
+terminate(_Reason, #state{tick = TRef}) ->
     emqttd_broker:stop_tick(TRef).
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-%%%=============================================================================
-%%% Internal functions
-%%%=============================================================================
+%%--------------------------------------------------------------------
+%% Internal functions
+%%--------------------------------------------------------------------
+
 publish(Stat, Val) ->
-    Msg = emqttd_message:make(stats, stats_topic(Stat),
-                              emqttd_util:integer_to_binary(Val)),
-    emqttd_pubsub:publish(Msg).
+    Msg = emqttd_message:make(stats, stats_topic(Stat), bin(Val)),
+    emqttd:publish(emqttd_message:set_flag(sys, Msg)).
 
 stats_topic(Stat) ->
     emqttd_topic:systop(list_to_binary(lists:concat(['stats/', Stat]))).
+
+bin(I) when is_integer(I) -> list_to_binary(integer_to_list(I)).
 

@@ -1,170 +1,164 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc emqttd websocket client
-%%%
-%%% @author Feng Lee <feng@emqtt.io>
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
+
+%% @doc MQTT WebSocket Connection.
+
 -module(emqttd_ws_client).
+
+-behaviour(gen_server2).
+
+-author("Feng Lee <feng@emqtt.io>").
 
 -include("emqttd.hrl").
 
 -include("emqttd_protocol.hrl").
 
+-include("emqttd_internal.hrl").
+
+-import(proplists, [get_value/3]).
+
 %% API Exports
--export([start_link/1, ws_loop/3, session/1, info/1, kick/1]).
+-export([start_link/4]).
+
+%% Management and Monitor API
+-export([info/1, stats/1, kick/1, clean_acl_cache/2]).
 
 %% SUB/UNSUB Asynchronously
 -export([subscribe/2, unsubscribe/2]).
 
--behaviour(gen_server).
+%% Get the session proc?
+-export([session/1]).
 
 %% gen_server Function Exports
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
-%% WebSocket Loop State
--record(wsocket_state, {request, client_pid, packet_opts, parser_fun}).
+%% gen_server2 Callbacks
+-export([prioritise_call/4, prioritise_info/3, handle_pre_hibernate/1]).
 
 %% WebSocket Client State
--record(wsclient_state, {ws_pid, request, proto_state, keepalive}).
+-record(wsclient_state, {ws_pid, peername, connection, proto_state, keepalive,
+                         enable_stats, force_gc_count}).
 
--define(WSLOG(Level, Format, Args, Req),
-              lager:Level("WsClient(~s): " ++ Format, [Req:get(peer) | Args])).
+-define(SOCK_STATS, [recv_oct, recv_cnt, send_oct, send_cnt, send_pend]).
 
-%%------------------------------------------------------------------------------
-%% @doc Start WebSocket client.
-%% @end
-%%------------------------------------------------------------------------------
-start_link(Req) ->
-    PktOpts = emqttd:env(mqtt, packet),
-    ParserFun = emqttd_parser:new(PktOpts),
-    {ReentryWs, ReplyChannel} = upgrade(Req),
-    Params = [self(), Req, ReplyChannel, PktOpts],
-    {ok, ClientPid} = gen_server:start_link(?MODULE, Params, []),
-    ReentryWs(#wsocket_state{request     = Req,
-                             client_pid  = ClientPid,
-                             packet_opts = PktOpts,
-                             parser_fun  = ParserFun}).
+-define(WSLOG(Level, Format, Args, State),
+              lager:Level("WsClient(~s): " ++ Format,
+                          [esockd_net:format(State#wsclient_state.peername) | Args])).
 
-session(CPid) ->
-    gen_server:call(CPid, session, infinity).
+%% @doc Start WebSocket Client.
+start_link(Env, WsPid, Req, ReplyChannel) ->
+    gen_server2:start_link(?MODULE, [Env, WsPid, Req, ReplyChannel],
+                           [{spawn_opt, ?FULLSWEEP_OPTS}]). %% Tune GC.
 
 info(CPid) ->
-    gen_server:call(CPid, info, infinity).
+    gen_server2:call(CPid, info).
+
+stats(CPid) ->
+    gen_server2:call(CPid, stats).
 
 kick(CPid) ->
-    gen_server:call(CPid, kick).
+    gen_server2:call(CPid, kick).
 
 subscribe(CPid, TopicTable) ->
-    gen_server:cast(CPid, {subscribe, TopicTable}).
+    CPid ! {subscribe, TopicTable}.
 
 unsubscribe(CPid, Topics) ->
-    gen_server:cast(CPid, {unsubscribe, Topics}).
+    CPid ! {unsubscribe, Topics}.
 
-%%------------------------------------------------------------------------------
-%% @private
-%% @doc Start WebSocket client.
-%% @end
-%%------------------------------------------------------------------------------
-upgrade(Req) ->
-    mochiweb_websocket:upgrade_connection(Req, fun ?MODULE:ws_loop/3).
+session(CPid) ->
+    gen_server2:call(CPid, session).
 
-%%------------------------------------------------------------------------------
-%% @doc WebSocket frame receive loop.
-%% @end
-%%------------------------------------------------------------------------------
-ws_loop(<<>>, State, _ReplyChannel) ->
-    State;
-ws_loop([<<>>], State, _ReplyChannel) ->
-    State;
-ws_loop(Data, State = #wsocket_state{request    = Req,
-                                     client_pid = ClientPid,
-                                     parser_fun = ParserFun}, ReplyChannel) ->
-    ?WSLOG(debug, "RECV ~p", [Data], Req),
-    case catch ParserFun(iolist_to_binary(Data)) of
-        {more, NewParser} ->
-            State#wsocket_state{parser_fun = NewParser};
-        {ok, Packet, Rest} ->
-            gen_server:cast(ClientPid, {received, Packet}),
-            ws_loop(Rest, reset_parser(State), ReplyChannel);
-        {error, Error} ->
-            ?WSLOG(error, "Frame error: ~p", [Error], Req),
-            exit({shutdown, Error});
-        {'EXIT', Reason} ->
-            ?WSLOG(error, "Frame error: ~p", [Reason], Req),
-            ?WSLOG(error, "Error data: ~p", [Data], Req),
-            exit({shutdown, parser_error})
+clean_acl_cache(CPid, Topic) ->
+    gen_server2:call(CPid, {clean_acl_cache, Topic}).
+
+%%--------------------------------------------------------------------
+%% gen_server Callbacks
+%%--------------------------------------------------------------------
+
+init([Env, WsPid, Req, ReplyChannel]) ->
+    process_flag(trap_exit, true),
+    Conn = Req:get(connection),
+    true = link(WsPid),
+    case Req:get(peername) of
+        {ok, Peername} ->
+            Headers = mochiweb_headers:to_list(
+                        mochiweb_request:get(headers, Req)),
+            ProtoState = emqttd_protocol:init(Conn, Peername, send_fun(ReplyChannel),
+                                              [{ws_initial_headers, Headers} | Env]),
+            IdleTimeout = get_value(client_idle_timeout, Env, 30000),
+            EnableStats = get_value(client_enable_stats, Env, false),
+            ForceGcCount = emqttd_gc:conn_max_gc_count(),
+            {ok, #wsclient_state{connection     = Conn,
+                                 ws_pid         = WsPid,
+                                 peername       = Peername,
+                                 proto_state    = ProtoState,
+                                 enable_stats   = EnableStats,
+                                 force_gc_count = ForceGcCount},
+             IdleTimeout, {backoff, 2000, 2000, 20000}, ?MODULE};
+        {error, enotconn} -> Conn:fast_close(),
+                             exit(WsPid, normal),
+                             exit(normal);
+        {error, Reason}   -> Conn:fast_close(),
+                             exit(WsPid, normal),
+                             exit({shutdown, Reason})
     end.
 
-reset_parser(State = #wsocket_state{packet_opts = PktOpts}) ->
-    State#wsocket_state{parser_fun = emqttd_parser:new(PktOpts)}.
+prioritise_call(Msg, _From, _Len, _State) ->
+    case Msg of info -> 10; stats -> 10; state -> 10; _ -> 5 end.
 
-%%%=============================================================================
-%%% gen_server callbacks
-%%%=============================================================================
+prioritise_info(Msg, _Len, _State) ->
+    case Msg of {redeliver, _} -> 5; _ -> 0 end.
 
-init([WsPid, Req, ReplyChannel, PktOpts]) ->
-    %%issue#413: trap_exit is unnecessary
-    %%process_flag(trap_exit, true),
-    {ok, Peername} = Req:get(peername),
-    SendFun = fun(Payload) -> ReplyChannel({binary, Payload}) end,
-    Headers = mochiweb_request:get(headers, Req),
-    HeadersList = mochiweb_headers:to_list(Headers),
-    ProtoState = emqttd_protocol:init(Peername, SendFun,
-                                      [{ws_initial_headers, HeadersList} | PktOpts]),
-    {ok, #wsclient_state{ws_pid = WsPid, request = Req, proto_state = ProtoState}}.
+handle_pre_hibernate(State = #wsclient_state{ws_pid = WsPid}) ->
+    erlang:garbage_collect(WsPid),
+    {hibernate, emqttd_gc:reset_conn_gc_count(#wsclient_state.force_gc_count, emit_stats(State))}.
 
-handle_call(session, _From, State = #wsclient_state{proto_state = ProtoState}) ->
-    {reply, emqttd_protocol:session(ProtoState), State};
+handle_call(info, From, State = #wsclient_state{peername    = Peername,
+                                                proto_state = ProtoState}) ->
+    Info = [{websocket, true}, {peername, Peername} | emqttd_protocol:info(ProtoState)],
+    {reply, Stats, _, _} = handle_call(stats, From, State),
+    reply(lists:append(Info, Stats), State);
 
-handle_call(info, _From, State = #wsclient_state{request     = Req,
-                                                 proto_state = ProtoState}) ->
-    ProtoInfo = emqttd_protocol:info(ProtoState),
-    {reply, [{websocket, true}, {peer, Req:get(peer)}| ProtoInfo], State};
+handle_call(stats, _From, State = #wsclient_state{proto_state = ProtoState}) ->
+    reply(lists:append([emqttd_misc:proc_stats(),
+                        wsock_stats(State),
+                        emqttd_protocol:stats(ProtoState)]), State);
 
 handle_call(kick, _From, State) ->
     {stop, {shutdown, kick}, ok, State};
 
-handle_call(Req, _From, State = #wsclient_state{request = HttpReq}) ->
-    ?WSLOG(critical, "Unexpected request: ~p", [Req], HttpReq),
-    {reply, {error, unsupported_request}, State}.
+handle_call(session, _From, State = #wsclient_state{proto_state = ProtoState}) ->
+    reply(emqttd_protocol:session(ProtoState), State);
 
-handle_cast({subscribe, TopicTable}, State) ->
-    with_session(fun(SessPid) ->
-                   emqttd_session:subscribe(SessPid, TopicTable)
-                 end, State);
+handle_call({clean_acl_cache, Topic}, _From, State) ->
+    erase({acl, publish, Topic}),
+    reply(ok, State);
 
-handle_cast({unsubscribe, Topics}, State) ->
-    with_session(fun(SessPid) ->
-                   emqttd_session:unsubscribe(SessPid, Topics)
-                 end, State);
+handle_call(Req, _From, State) ->
+    ?WSLOG(error, "Unexpected request: ~p", [Req], State),
+    reply({error, unexpected_request}, State).
 
-handle_cast({received, Packet}, State = #wsclient_state{request     = Req,
-                                                        proto_state = ProtoState}) ->
+handle_cast({received, Packet}, State = #wsclient_state{proto_state = ProtoState}) ->
+    emqttd_metrics:received(Packet),
     case emqttd_protocol:received(Packet, ProtoState) of
         {ok, ProtoState1} ->
-            noreply(State#wsclient_state{proto_state = ProtoState1});
+            {noreply, gc(State#wsclient_state{proto_state = ProtoState1}), hibernate};
         {error, Error} ->
-            ?WSLOG(error, "Protocol error - ~p", [Error], Req),
+            ?WSLOG(error, "Protocol error - ~p", [Error], State),
             shutdown(Error, State);
         {error, Error, ProtoState1} ->
             shutdown(Error, State#wsclient_state{proto_state = ProtoState1});
@@ -172,62 +166,94 @@ handle_cast({received, Packet}, State = #wsclient_state{request     = Req,
             stop(Reason, State#wsclient_state{proto_state = ProtoState1})
     end;
 
-handle_cast(Msg, State = #wsclient_state{request = Req}) ->
-    ?WSLOG(critical, "Unexpected msg: ~p", [Msg], Req),
-    {noreply, State}.
+handle_cast(Msg, State) ->
+    ?WSLOG(error, "Unexpected Msg: ~p", [Msg], State),
+    {noreply, State, hibernate}.
+
+handle_info({subscribe, TopicTable}, State) ->
+    with_proto(
+      fun(ProtoState) ->
+          emqttd_protocol:subscribe(TopicTable, ProtoState)
+      end, State);
+
+handle_info({unsubscribe, Topics}, State) ->
+    with_proto(
+      fun(ProtoState) ->
+          emqttd_protocol:unsubscribe(Topics, ProtoState)
+      end, State);
 
 handle_info({suback, PacketId, GrantedQos}, State) ->
-    with_proto_state(fun(ProtoState) ->
-                       Packet = ?SUBACK_PACKET(PacketId, GrantedQos),
-                       emqttd_protocol:send(Packet, ProtoState)
-                     end, State);
+    with_proto(
+      fun(ProtoState) ->
+          Packet = ?SUBACK_PACKET(PacketId, GrantedQos),
+          emqttd_protocol:send(Packet, ProtoState)
+      end, State);
 
 handle_info({deliver, Message}, State) ->
-    with_proto_state(fun(ProtoState) ->
-                       emqttd_protocol:send(Message, ProtoState)
-                     end, State);
+    with_proto(
+      fun(ProtoState) ->
+          emqttd_protocol:send(Message, ProtoState)
+      end, gc(State));
 
 handle_info({redeliver, {?PUBREL, PacketId}}, State) ->
-    with_proto_state(fun(ProtoState) ->
-                       emqttd_protocol:redeliver({?PUBREL, PacketId}, ProtoState)
-                     end, State);
+    with_proto(
+      fun(ProtoState) ->
+          emqttd_protocol:pubrel(PacketId, ProtoState)
+      end, State);
 
-handle_info({shutdown, conflict, {ClientId, NewPid}}, State = #wsclient_state{request = Req}) ->
-    ?WSLOG(warning, "clientid '~s' conflict with ~p", [ClientId, NewPid], Req),
+handle_info(emit_stats, State) ->
+    {noreply, emit_stats(State), hibernate};
+
+handle_info(timeout, State) ->
+    shutdown(idle_timeout, State);
+
+handle_info({shutdown, conflict, {ClientId, NewPid}}, State) ->
+    ?WSLOG(warning, "clientid '~s' conflict with ~p", [ClientId, NewPid], State),
     shutdown(conflict, State);
 
-handle_info({keepalive, start, Interval}, State = #wsclient_state{request = Req}) ->
-    ?WSLOG(debug, "Keepalive at the interval of ~p", [Interval], Req),
-    Conn = Req:get(connection),
-    StatFun = fun() ->
-        case Conn:getstat([recv_oct]) of
-            {ok, [{recv_oct, RecvOct}]} -> {ok, RecvOct};
-            {error, Error}              -> {error, Error}
-        end
-    end,
-    KeepAlive = emqttd_keepalive:start(StatFun, Interval, {keepalive, check}),
-    noreply(State#wsclient_state{keepalive = KeepAlive});
+handle_info({shutdown, Reason}, State) ->
+    shutdown(Reason, State);
 
-handle_info({keepalive, check}, State = #wsclient_state{request   = Req,
-                                                        keepalive = KeepAlive}) ->
+handle_info({keepalive, start, Interval}, State = #wsclient_state{connection = Conn}) ->
+    ?WSLOG(debug, "Keepalive at the interval of ~p", [Interval], State),
+    case emqttd_keepalive:start(stat_fun(Conn), Interval, {keepalive, check}) of
+        {ok, KeepAlive} ->
+            {noreply, State#wsclient_state{keepalive = KeepAlive}, hibernate};
+        {error, Error} ->
+            ?WSLOG(warning, "Keepalive error - ~p", [Error], State),
+            shutdown(Error, State)
+    end;
+
+handle_info({keepalive, check}, State = #wsclient_state{keepalive = KeepAlive}) ->
     case emqttd_keepalive:check(KeepAlive) of
         {ok, KeepAlive1} ->
-            noreply(State#wsclient_state{keepalive = KeepAlive1});
+            {noreply, emit_stats(State#wsclient_state{keepalive = KeepAlive1}), hibernate};
         {error, timeout} ->
-            ?WSLOG(debug, "Keepalive Timeout!", [], Req),
+            ?WSLOG(debug, "Keepalive Timeout!", [], State),
             shutdown(keepalive_timeout, State);
         {error, Error} ->
-            ?WSLOG(warning, "Keepalive error - ~p", [Error], Req),
+            ?WSLOG(warning, "Keepalive error - ~p", [Error], State),
             shutdown(keepalive_error, State)
     end;
 
-%%issue#413: removed the trap_exit flag
-%%handle_info({'EXIT', WsPid, Reason}, State = #wsclient_state{ws_pid = WsPid}) ->
-%%    stop(Reason, State);
+handle_info({'EXIT', WsPid, normal}, State = #wsclient_state{ws_pid = WsPid}) ->
+    stop(normal, State);
 
-handle_info(Info, State = #wsclient_state{request = Req}) ->
-    ?WSLOG(critical, "Unexpected Info: ~p", [Info], Req),
-    noreply(State).
+handle_info({'EXIT', WsPid, Reason}, State = #wsclient_state{ws_pid = WsPid}) ->
+    ?WSLOG(error, "shutdown: ~p",[Reason], State),
+    shutdown(Reason, State);
+
+%% The session process exited unexpectedly.
+handle_info({'EXIT', Pid, Reason}, State = #wsclient_state{proto_state = ProtoState}) ->
+    case emqttd_protocol:session(ProtoState) of
+        Pid -> stop(Reason, State);
+        _   -> ?WSLOG(error, "Unexpected EXIT: ~p, Reason: ~p", [Pid, Reason], State),
+               {noreply, State, hibernate}
+    end;
+
+handle_info(Info, State) ->
+    ?WSLOG(error, "Unexpected Info: ~p", [Info], State),
+    {noreply, State, hibernate}.
 
 terminate(Reason, #wsclient_state{proto_state = ProtoState, keepalive = KeepAlive}) ->
     emqttd_keepalive:cancel(KeepAlive),
@@ -241,23 +267,61 @@ terminate(Reason, #wsclient_state{proto_state = ProtoState, keepalive = KeepAliv
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-%%%=============================================================================
-%%% Internal functions
-%%%=============================================================================
+%%--------------------------------------------------------------------
+%% Internal functions
+%%--------------------------------------------------------------------
 
-with_proto_state(Fun, State = #wsclient_state{proto_state = ProtoState}) ->
+send_fun(ReplyChannel) ->
+    Self = self(),
+    fun(Packet) ->
+        Data = emqttd_serializer:serialize(Packet),
+        emqttd_metrics:inc('bytes/sent', iolist_size(Data)),
+        case ReplyChannel({binary, Data}) of
+            ok -> ok;
+            {error, Reason} -> Self ! {shutdown, Reason}
+        end
+    end.
+
+stat_fun(Conn) ->
+    fun() ->
+        case Conn:getstat([recv_oct]) of
+            {ok, [{recv_oct, RecvOct}]} -> {ok, RecvOct};
+            {error, Error}              -> {error, Error}
+        end
+    end.
+
+emit_stats(State = #wsclient_state{proto_state = ProtoState}) ->
+    emit_stats(emqttd_protocol:clientid(ProtoState), State).
+
+emit_stats(_ClientId, State = #wsclient_state{enable_stats = false}) ->
+    State;
+emit_stats(undefined, State) ->
+    State;
+emit_stats(ClientId, State) ->
+    {reply, Stats, _, _} = handle_call(stats, undefined, State),
+    emqttd_stats:set_client_stats(ClientId, Stats),
+    State.
+
+wsock_stats(#wsclient_state{connection = Conn}) ->
+    case Conn:getstat(?SOCK_STATS) of
+        {ok,   Ss} -> Ss;
+        {error, _} -> []
+    end.
+
+with_proto(Fun, State = #wsclient_state{proto_state = ProtoState}) ->
     {ok, ProtoState1} = Fun(ProtoState),
-    noreply(State#wsclient_state{proto_state = ProtoState1}).
+    {noreply, State#wsclient_state{proto_state = ProtoState1}, hibernate}.
 
-with_session(Fun, State = #wsclient_state{proto_state = ProtoState}) ->
-    Fun(emqttd_protocol:session(ProtoState)), noreply(State).
-
-noreply(State) ->
-    {noreply, State, hibernate}.
+reply(Reply, State) ->
+    {reply, Reply, State, hibernate}.
 
 shutdown(Reason, State) ->
     stop({shutdown, Reason}, State).
 
-stop(Reason, State ) ->
+stop(Reason, State) ->
     {stop, Reason, State}.
+
+gc(State) ->
+    Cb = fun() -> emit_stats(State) end,
+    emqttd_gc:maybe_force_gc(#wsclient_state.force_gc_count, State, Cb).
 

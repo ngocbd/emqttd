@@ -1,29 +1,22 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc emqttd protocol.
-%%%
-%%% @author Feng Lee <feng@emqtt.io>
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
+
 -module(emqttd_protocol).
+
+-author("Feng Lee <feng@emqtt.io>").
 
 -include("emqttd.hrl").
 
@@ -31,45 +24,83 @@
 
 -include("emqttd_internal.hrl").
 
-%% API
--export([init/3, info/1, clientid/1, client/1, session/1]).
+-import(proplists, [get_value/2, get_value/3]).
 
--export([received/2, send/2, redeliver/2, shutdown/2]).
+%% API
+-export([init/3, init/4, info/1, stats/1, clientid/1, client/1, session/1]).
+
+-export([subscribe/2, unsubscribe/2, pubrel/2, shutdown/2]).
+
+-export([received/2, send/2]).
 
 -export([process/2]).
 
-%% Protocol State
--record(proto_state, {peername, sendfun, connected = false,
-                      client_id, client_pid, clean_sess,
-                      proto_ver, proto_name, username,
-                      will_msg, keepalive, max_clientid_len = ?MAX_CLIENTID_LEN,
-                      session, ws_initial_headers, %% Headers from first HTTP request for websocket client
-                      connected_at}).
+-record(proto_stats, {enable_stats = false, recv_pkt = 0, recv_msg = 0,
+                      send_pkt = 0, send_msg = 0}).
 
--type proto_state() :: #proto_state{}.
+%% Protocol State
+%% ws_initial_headers: Headers from first HTTP request for WebSocket Client.
+-record(proto_state, {peername, sendfun, connected = false, client_id, client_pid,
+                      clean_sess, proto_ver, proto_name, username, is_superuser,
+                      will_msg, keepalive, keepalive_backoff, max_clientid_len,
+                      session, stats_data, mountpoint, ws_initial_headers,
+                      peercert_username, is_bridge, connected_at}).
+
+-type(proto_state() :: #proto_state{}).
 
 -define(INFO_KEYS, [client_id, username, clean_sess, proto_ver, proto_name,
-                    keepalive, will_msg, ws_initial_headers, connected_at]).
+                    keepalive, will_msg, ws_initial_headers, mountpoint,
+                    peercert_username, connected_at]).
+
+-define(STATS_KEYS, [recv_pkt, recv_msg, send_pkt, send_msg]).
 
 -define(LOG(Level, Format, Args, State),
             lager:Level([{client, State#proto_state.client_id}], "Client(~s@~s): " ++ Format,
                         [State#proto_state.client_id, esockd_net:format(State#proto_state.peername) | Args])).
 
-%%------------------------------------------------------------------------------
 %% @doc Init protocol
-%% @end
-%%------------------------------------------------------------------------------
 init(Peername, SendFun, Opts) ->
-    MaxLen = emqttd_opts:g(max_clientid_len, Opts, ?MAX_CLIENTID_LEN),
-    WsInitialHeaders = emqttd_opts:g(ws_initial_headers, Opts),
+    Backoff = get_value(keepalive_backoff, Opts, 1.25),
+    EnableStats = get_value(client_enable_stats, Opts, false),
+    MaxLen = get_value(max_clientid_len, Opts, ?MAX_CLIENTID_LEN),
+    WsInitialHeaders = get_value(ws_initial_headers, Opts),
     #proto_state{peername           = Peername,
                  sendfun            = SendFun,
                  max_clientid_len   = MaxLen,
+                 is_superuser       = false,
                  client_pid         = self(),
-                 ws_initial_headers = WsInitialHeaders}.
+                 peercert_username  = undefined,
+                 ws_initial_headers = WsInitialHeaders,
+                 keepalive_backoff  = Backoff,
+                 stats_data         = #proto_stats{enable_stats = EnableStats}}.
+
+init(Conn, Peername, SendFun, Opts) ->
+    enrich_opt(Conn:opts(), Conn, init(Peername, SendFun, Opts)).
+
+enrich_opt([], _Conn, State) ->
+    State;
+enrich_opt([{mountpoint, MountPoint} | ConnOpts], Conn, State) ->
+    enrich_opt(ConnOpts, Conn, State#proto_state{mountpoint = MountPoint});
+enrich_opt([{peer_cert_as_username, N} | ConnOpts], Conn, State) ->
+    enrich_opt(ConnOpts, Conn, State#proto_state{peercert_username = peercert_username(N, Conn)});
+enrich_opt([_ | ConnOpts], Conn, State) ->
+    enrich_opt(ConnOpts, Conn, State).
+
+peercert_username(cn, Conn) ->
+    Conn:peer_cert_common_name();
+peercert_username(dn, Conn) ->
+    Conn:peer_cert_subject().
+
+repl_username_with_peercert(State = #proto_state{peercert_username = undefined}) ->
+    State;
+repl_username_with_peercert(State = #proto_state{peercert_username = PeerCert}) ->
+    State#proto_state{username = PeerCert}.
 
 info(ProtoState) ->
     ?record_to_proplist(proto_state, ProtoState, ?INFO_KEYS).
+
+stats(#proto_state{stats_data = Stats}) ->
+    tl(?record_to_proplist(proto_stats, Stats)).
 
 clientid(#proto_state{client_id = ClientId}) ->
     ClientId.
@@ -83,6 +114,7 @@ client(#proto_state{client_id          = ClientId,
                     keepalive          = Keepalive,
                     will_msg           = WillMsg,
                     ws_initial_headers = WsInitialHeaders,
+                    mountpoint         = MountPoint,
                     connected_at       = Time}) ->
     WillTopic = if
                     WillMsg =:= undefined -> undefined;
@@ -97,6 +129,7 @@ client(#proto_state{client_id          = ClientId,
                  keepalive          = Keepalive,
                  will_topic         = WillTopic,
                  ws_initial_headers = WsInitialHeaders,
+                 mountpoint         = MountPoint,
                  connected_at       = Time}.
 
 session(#proto_state{session = Session}) ->
@@ -104,10 +137,12 @@ session(#proto_state{session = Session}) ->
 
 %% CONNECT – Client requests a connection to a Server
 
-%% A Client can only send the CONNECT Packet once over a Network Connection. 
--spec received(mqtt_packet(), proto_state()) -> {ok, proto_state()} | {error, any()}. 
-received(Packet = ?PACKET(?CONNECT), State = #proto_state{connected = false}) ->
-    process(Packet, State#proto_state{connected = true});
+%% A Client can only send the CONNECT Packet once over a Network Connection.
+-spec(received(mqtt_packet(), proto_state()) -> {ok, proto_state()} | {error, term()}).
+received(Packet = ?PACKET(?CONNECT),
+         State = #proto_state{connected = false, stats_data = Stats}) ->
+    trace(recv, Packet, State), Stats1 = inc_stats(recv, ?CONNECT, Stats),
+    process(Packet, State#proto_state{connected = true, stats_data = Stats1});
 
 received(?PACKET(?CONNECT), State = #proto_state{connected = true}) ->
     {error, protocol_bad_connect, State};
@@ -116,16 +151,44 @@ received(?PACKET(?CONNECT), State = #proto_state{connected = true}) ->
 received(_Packet, State = #proto_state{connected = false}) ->
     {error, protocol_not_connected, State};
 
-received(Packet = ?PACKET(_Type), State) ->
-    trace(recv, Packet, State),
+received(Packet = ?PACKET(Type), State = #proto_state{stats_data = Stats}) ->
+    trace(recv, Packet, State), Stats1 = inc_stats(recv, Type, Stats),
     case validate_packet(Packet) of
         ok ->
-            process(Packet, State);
+            process(Packet, State#proto_state{stats_data = Stats1});
         {error, Reason} ->
             {error, Reason, State}
     end.
 
-process(Packet = ?CONNECT_PACKET(Var), State0) ->
+subscribe(RawTopicTable, ProtoState = #proto_state{client_id = ClientId,
+                                                   username  = Username,
+                                                   session   = Session,
+                                                   mountpoint = MountPoint}) ->
+    TopicTable = parse_topic_table(RawTopicTable),
+    case emqttd_hooks:run('client.subscribe', [ClientId, Username], TopicTable) of
+        {ok, TopicTable1} ->
+            emqttd_session:subscribe(Session, mount(MountPoint, TopicTable1));
+        {stop, _} ->
+            ok
+    end,
+    {ok, ProtoState}.
+
+unsubscribe(RawTopics, ProtoState = #proto_state{client_id = ClientId,
+                                                 username  = Username,
+                                                 session   = Session,
+                                                 mountpoint = MountPoint}) ->
+    case emqttd_hooks:run('client.unsubscribe', [ClientId, Username], parse_topics(RawTopics)) of
+        {ok, TopicTable} ->
+            emqttd_session:unsubscribe(Session, mount(MountPoint, TopicTable));
+        {stop, _} ->
+            ok
+    end,
+    {ok, ProtoState}.
+
+%% @doc Send PUBREL
+pubrel(PacketId, State) -> send(?PUBREL_PACKET(PacketId), State).
+
+process(?CONNECT_PACKET(Var), State0) ->
 
     #mqtt_packet_connect{proto_ver  = ProtoVer,
                          proto_name = ProtoName,
@@ -133,57 +196,61 @@ process(Packet = ?CONNECT_PACKET(Var), State0) ->
                          password   = Password,
                          clean_sess = CleanSess,
                          keep_alive = KeepAlive,
-                         client_id  = ClientId} = Var,
+                         client_id  = ClientId,
+                         is_bridge  = IsBridge} = Var,
 
-    State1 = State0#proto_state{proto_ver  = ProtoVer,
-                                proto_name = ProtoName,
-                                username   = Username,
-                                client_id  = ClientId,
-                                clean_sess = CleanSess,
-                                keepalive  = KeepAlive,
-                                will_msg   = willmsg(Var),
-                                connected_at = os:timestamp()},
-
-    trace(recv, Packet, State1),
+    State1 = repl_username_with_peercert(
+               State0#proto_state{proto_ver    = ProtoVer,
+                                  proto_name   = ProtoName,
+                                  username     = Username,
+                                  client_id    = ClientId,
+                                  clean_sess   = CleanSess,
+                                  keepalive    = KeepAlive,
+                                  will_msg     = willmsg(Var, State0),
+                                  is_bridge    = IsBridge,
+                                  connected_at = os:timestamp()}),
 
     {ReturnCode1, SessPresent, State3} =
     case validate_connect(Var, State1) of
         ?CONNACK_ACCEPT ->
-            case emqttd_access_control:auth(client(State1), Password) of
-                ok ->
+            case authenticate(client(State1), Password) of
+                {ok, IsSuperuser} ->
                     %% Generate clientId if null
                     State2 = maybe_set_clientid(State1),
 
                     %% Start session
-                    case emqttd_sm:start_session(CleanSess, clientid(State2)) of
+                    case emqttd_sm:start_session(CleanSess, {clientid(State2), Username}) of
                         {ok, Session, SP} ->
                             %% Register the client
-                            emqttd_cm:register(client(State2)),
+                            emqttd_cm:reg(client(State2)),
                             %% Start keepalive
-                            start_keepalive(KeepAlive),
+                            start_keepalive(KeepAlive, State2),
+                            %% Emit Stats
+                            self() ! emit_stats,
                             %% ACCEPT
-                            {?CONNACK_ACCEPT, SP, State2#proto_state{session = Session}};
+                            {?CONNACK_ACCEPT, SP, State2#proto_state{session = Session, is_superuser = IsSuperuser}};
                         {error, Error} ->
-                            exit({shutdown, Error})
+                            ?LOG(error, "Username '~s' login failed for ~p", [Username, Error], State2),
+                            {?CONNACK_SERVER, false, State2}
                     end;
                 {error, Reason}->
-                    ?LOG(error, "Username '~s' login failed for ~s", [Username, Reason], State1),
+                    ?LOG(error, "Username '~s' login failed for ~p", [Username, Reason], State1),
                     {?CONNACK_CREDENTIALS, false, State1}
             end;
         ReturnCode ->
             {ReturnCode, false, State1}
     end,
     %% Run hooks
-    emqttd_broker:foreach_hooks('client.connected', [ReturnCode1, client(State3)]),
+    emqttd_hooks:run('client.connected', [ReturnCode1], client(State3)),
     %% Send connack
-    send(?CONNACK_PACKET(ReturnCode1, sp(SessPresent)), State3);
+    send(?CONNACK_PACKET(ReturnCode1, sp(SessPresent)), State3),
+    %% stop if authentication failure
+    stop_if_auth_failure(ReturnCode1, State3);
 
-process(Packet = ?PUBLISH_PACKET(_Qos, Topic, _PacketId, _Payload), State) ->
-    case check_acl(publish, Topic, client(State)) of
-        allow ->
-            publish(Packet, State);
-        deny ->
-            ?LOG(error, "Cannot publish to ~s for ACL Deny", [Topic], State)
+process(Packet = ?PUBLISH_PACKET(_Qos, Topic, _PacketId, _Payload), State = #proto_state{is_superuser = IsSuper}) ->
+    case IsSuper orelse allow == check_acl(publish, Topic, client(State)) of
+        true  -> publish(Packet, State);
+        false -> ?LOG(error, "Cannot publish to ~s for ACL Deny", [Topic], State)
     end,
     {ok, State};
 
@@ -206,23 +273,47 @@ process(?PUBACK_PACKET(?PUBCOMP, PacketId), State = #proto_state{session = Sessi
 process(?SUBSCRIBE_PACKET(PacketId, []), State) ->
     send(?SUBACK_PACKET(PacketId, []), State);
 
-process(?SUBSCRIBE_PACKET(PacketId, TopicTable), State = #proto_state{session = Session}) ->
-    Client = client(State),
-    AllowDenies = [check_acl(subscribe, Topic, Client) || {Topic, _Qos} <- TopicTable],
+%% TODO: refactor later...
+process(?SUBSCRIBE_PACKET(PacketId, RawTopicTable),
+        State = #proto_state{client_id    = ClientId,
+                             username     = Username,
+                             is_superuser = IsSuperuser,
+                             mountpoint   = MountPoint,
+                             session      = Session}) ->
+    Client = client(State), TopicTable = parse_topic_table(RawTopicTable),
+    AllowDenies = if
+                    IsSuperuser -> [];
+                    true -> [check_acl(subscribe, Topic, Client) || {Topic, _Opts} <- TopicTable]
+                  end,
     case lists:member(deny, AllowDenies) of
         true ->
             ?LOG(error, "Cannot SUBSCRIBE ~p for ACL Deny", [TopicTable], State),
             send(?SUBACK_PACKET(PacketId, [16#80 || _ <- TopicTable]), State);
         false ->
-            emqttd_session:subscribe(Session, PacketId, TopicTable), {ok, State}
+            case emqttd_hooks:run('client.subscribe', [ClientId, Username], TopicTable) of
+                {ok, TopicTable1} ->
+                    emqttd_session:subscribe(Session, PacketId, mount(MountPoint, TopicTable1)),
+                    {ok, State};
+                {stop, _} ->
+                    {ok, State}
+            end
     end;
 
 %% Protect from empty topic list
 process(?UNSUBSCRIBE_PACKET(PacketId, []), State) ->
     send(?UNSUBACK_PACKET(PacketId), State);
 
-process(?UNSUBSCRIBE_PACKET(PacketId, Topics), State = #proto_state{session = Session}) ->
-    emqttd_session:unsubscribe(Session, Topics),
+process(?UNSUBSCRIBE_PACKET(PacketId, RawTopics),
+        State = #proto_state{client_id  = ClientId,
+                             username   = Username,
+                             mountpoint = MountPoint,
+                             session    = Session}) ->
+    case emqttd_hooks:run('client.unsubscribe', [ClientId, Username], parse_topics(RawTopics)) of
+        {ok, TopicTable} ->
+            emqttd_session:unsubscribe(Session, mount(MountPoint, TopicTable));
+        {stop, _} ->
+            ok
+    end,
     send(?UNSUBACK_PACKET(PacketId), State);
 
 process(?PACKET(?PINGREQ), State) ->
@@ -233,8 +324,12 @@ process(?PACKET(?DISCONNECT), State) ->
     {stop, normal, State#proto_state{will_msg = undefined}}.
 
 publish(Packet = ?PUBLISH_PACKET(?QOS_0, _PacketId),
-        #proto_state{client_id = ClientId, session = Session}) ->
-    emqttd_session:publish(Session, emqttd_message:from_packet(ClientId, Packet));
+        #proto_state{client_id  = ClientId,
+                     username   = Username,
+                     mountpoint = MountPoint,
+                     session    = Session}) ->
+    Msg = emqttd_message:from_packet(Username, ClientId, Packet),
+    emqttd_session:publish(Session, mount(MountPoint, Msg));
 
 publish(Packet = ?PUBLISH_PACKET(?QOS_1, _PacketId), State) ->
     with_puback(?PUBACK, Packet, State);
@@ -243,57 +338,89 @@ publish(Packet = ?PUBLISH_PACKET(?QOS_2, _PacketId), State) ->
     with_puback(?PUBREC, Packet, State).
 
 with_puback(Type, Packet = ?PUBLISH_PACKET(_Qos, PacketId),
-            State = #proto_state{client_id = ClientId, session = Session}) ->
-    Msg = emqttd_message:from_packet(ClientId, Packet),
-    case emqttd_session:publish(Session, Msg) of
+            State = #proto_state{client_id  = ClientId,
+                                 username   = Username,
+                                 mountpoint = MountPoint,
+                                 session    = Session}) ->
+    Msg = emqttd_message:from_packet(Username, ClientId, Packet),
+    case emqttd_session:publish(Session, mount(MountPoint, Msg)) of
         ok ->
             send(?PUBACK_PACKET(Type, PacketId), State);
         {error, Error} ->
             ?LOG(error, "PUBLISH ~p error: ~p", [PacketId, Error], State)
     end.
 
--spec send(mqtt_message() | mqtt_packet(), proto_state()) -> {ok, proto_state()}.
-send(Msg, State) when is_record(Msg, mqtt_message) ->
-    send(emqttd_message:to_packet(Msg), State);
+-spec(send(mqtt_message() | mqtt_packet(), proto_state()) -> {ok, proto_state()}).
+send(Msg, State = #proto_state{client_id  = ClientId,
+                               username   = Username,
+                               mountpoint = MountPoint,
+                               is_bridge  = IsBridge})
+        when is_record(Msg, mqtt_message) ->
+    emqttd_hooks:run('message.delivered', [ClientId, Username], Msg),
+    send(emqttd_message:to_packet(unmount(MountPoint, clean_retain(IsBridge, Msg))), State);
 
-send(Packet, State = #proto_state{sendfun = SendFun})
-    when is_record(Packet, mqtt_packet) ->
+send(Packet = ?PACKET(Type), State = #proto_state{sendfun = SendFun, stats_data = Stats}) ->
     trace(send, Packet, State),
     emqttd_metrics:sent(Packet),
-    Data = emqttd_serializer:serialize(Packet),
-    ?LOG(debug, "SEND ~p", [Data], State),
-    emqttd_metrics:inc('bytes/sent', size(Data)),
-    SendFun(Data),
-    {ok, State}.
+    SendFun(Packet),
+    {ok, State#proto_state{stats_data = inc_stats(send, Type, Stats)}}.
 
 trace(recv, Packet, ProtoState) ->
-    ?LOG(info, "RECV ~s", [emqttd_packet:format(Packet)], ProtoState);
+    ?LOG(debug, "RECV ~s", [emqttd_packet:format(Packet)], ProtoState);
 
 trace(send, Packet, ProtoState) ->
-    ?LOG(info, "SEND ~s", [emqttd_packet:format(Packet)], ProtoState).
+    ?LOG(debug, "SEND ~s", [emqttd_packet:format(Packet)], ProtoState).
 
-%% @doc redeliver PUBREL PacketId
-redeliver({?PUBREL, PacketId}, State) ->
-    send(?PUBREL_PACKET(PacketId), State).
+inc_stats(_Direct, _Type, Stats = #proto_stats{enable_stats = false}) ->
+    Stats;
+
+inc_stats(recv, Type, Stats) ->
+    #proto_stats{recv_pkt = PktCnt, recv_msg = MsgCnt} = Stats,
+    inc_stats(Type, #proto_stats.recv_pkt, PktCnt, #proto_stats.recv_msg, MsgCnt, Stats);
+
+inc_stats(send, Type, Stats) ->
+    #proto_stats{send_pkt = PktCnt, send_msg = MsgCnt} = Stats,
+    inc_stats(Type, #proto_stats.send_pkt, PktCnt, #proto_stats.send_msg, MsgCnt, Stats).
+
+inc_stats(Type, PktPos, PktCnt, MsgPos, MsgCnt, Stats) ->
+    Stats1 = setelement(PktPos, Stats, PktCnt + 1),
+    case Type =:= ?PUBLISH of
+        true  -> setelement(MsgPos, Stats1, MsgCnt + 1);
+        false -> Stats1
+    end.
+
+stop_if_auth_failure(RC, State) when RC == ?CONNACK_CREDENTIALS; RC == ?CONNACK_AUTH ->
+    {stop, {shutdown, auth_failure}, State};
+
+stop_if_auth_failure(_RC, State) ->
+    {ok, State}.
 
 shutdown(_Error, #proto_state{client_id = undefined}) ->
     ignore;
-
-shutdown(conflict, #proto_state{client_id = _ClientId}) ->
+shutdown(conflict, _State) ->
     %% let it down
-    %% emqttd_cm:unregister(ClientId);
     ignore;
-
-shutdown(Error, State = #proto_state{client_id = ClientId, will_msg = WillMsg}) ->
-    ?LOG(info, "Shutdown for ~p", [Error], State),
-    send_willmsg(ClientId, WillMsg),
-    emqttd_broker:foreach_hooks('client.disconnected', [Error, ClientId]),
+shutdown(mnesia_conflict, _State) ->
     %% let it down
-    %% emqttd_cm:unregister(ClientId).
+    ignore;
+shutdown(Error, State = #proto_state{will_msg = WillMsg}) ->
+    ?LOG(debug, "Shutdown for ~p", [Error], State),
+    Client = client(State),
+    %% Auth failure not publish the will message
+    case Error =:= auth_failure of
+        true -> ok;
+        false -> send_willmsg(State, WillMsg)
+    end,
+    emqttd_hooks:run('client.disconnected', [Error], Client),
+    %% let it down
+    %% emqttd_cm:unreg(ClientId).
     ok.
 
-willmsg(Packet) when is_record(Packet, mqtt_packet_connect) ->
-    emqttd_message:from_packet(Packet).
+willmsg(Packet, #proto_state{mountpoint = MountPoint}) when is_record(Packet, mqtt_packet_connect) ->
+    case emqttd_message:from_packet(Packet) of
+        undefined -> undefined;
+        Msg -> mount(MountPoint, Msg)
+    end.
 
 %% Generate a client if if nulll
 maybe_set_clientid(State = #proto_state{client_id = NullId})
@@ -305,29 +432,34 @@ maybe_set_clientid(State = #proto_state{client_id = NullId})
 maybe_set_clientid(State) ->
     State.
 
-send_willmsg(_ClientId, undefined) ->
+send_willmsg(_State, undefined) ->
     ignore;
-send_willmsg(ClientId, WillMsg) -> 
-    emqttd_pubsub:publish(WillMsg#mqtt_message{from = ClientId}).
+send_willmsg(State = #proto_state{client_id = ClientId, username = Username, is_superuser = IsSuper},
+             WillMsg = #mqtt_message{topic = Topic}) ->
+    case IsSuper orelse allow == check_acl(publish, Topic, client(State)) of
+        true  -> emqttd:publish(WillMsg#mqtt_message{from = {ClientId, Username}});
+        false -> ?LOG(error, "Cannot publish LWT message to ~s for ACL Deny", [Topic], State)
+    end.
 
-start_keepalive(0) -> ignore;
+start_keepalive(0, _State) -> ignore;
 
-start_keepalive(Sec) when Sec > 0 ->
-    self() ! {keepalive, start, round(Sec * 1.2)}.
+start_keepalive(Sec, #proto_state{keepalive_backoff = Backoff}) when Sec > 0 ->
+    self() ! {keepalive, start, round(Sec * Backoff)}.
 
-%%----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
 %% Validate Packets
-%%----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+
 validate_connect(Connect = #mqtt_packet_connect{}, ProtoState) ->
     case validate_protocol(Connect) of
-        true -> 
+        true ->
             case validate_clientid(Connect, ProtoState) of
-                true -> 
+                true ->
                     ?CONNACK_ACCEPT;
-                false -> 
+                false ->
                     ?CONNACK_INVALID_ID
             end;
-        false -> 
+        false ->
             ?CONNACK_PROTO_VER
     end.
 
@@ -336,13 +468,19 @@ validate_protocol(#mqtt_packet_connect{proto_ver = Ver, proto_name = Name}) ->
 
 validate_clientid(#mqtt_packet_connect{client_id = ClientId},
                   #proto_state{max_clientid_len = MaxLen})
-    when (size(ClientId) >= 1) andalso (size(ClientId) =< MaxLen) ->
+    when (byte_size(ClientId) >= 1) andalso (byte_size(ClientId) =< MaxLen) ->
     true;
 
+%% Issue#599: Null clientId and clean_sess = false
+validate_clientid(#mqtt_packet_connect{client_id  = ClientId,
+                                       clean_sess = CleanSess}, _ProtoState)
+    when byte_size(ClientId) == 0 andalso (not CleanSess) ->
+    false;
+
 %% MQTT3.1.1 allow null clientId.
-validate_clientid(#mqtt_packet_connect{proto_ver =?MQTT_PROTO_V311,
+validate_clientid(#mqtt_packet_connect{proto_ver =?MQTT_PROTO_V4,
                                        client_id = ClientId}, _ProtoState)
-    when size(ClientId) =:= 0 ->
+    when byte_size(ClientId) =:= 0 ->
     true;
 
 validate_clientid(#mqtt_packet_connect{proto_ver  = ProtoVer,
@@ -363,7 +501,7 @@ validate_packet(?SUBSCRIBE_PACKET(_PacketId, TopicTable)) ->
 validate_packet(?UNSUBSCRIBE_PACKET(_PacketId, Topics)) ->
     validate_topics(filter, Topics);
 
-validate_packet(_Packet) -> 
+validate_packet(_Packet) ->
     ok.
 
 validate_topics(_Type, []) ->
@@ -392,15 +530,34 @@ validate_qos(Qos) when ?IS_QOS(Qos) ->
 validate_qos(_) ->
     false.
 
+parse_topic_table(TopicTable) ->
+    lists:map(fun({Topic0, Qos}) ->
+                {Topic, Opts} = emqttd_topic:parse(Topic0),
+                {Topic, [{qos, Qos}|Opts]}
+        end, TopicTable).
+
+parse_topics(Topics) ->
+    [emqttd_topic:parse(Topic) || Topic <- Topics].
+
+authenticate(Client, Password) ->
+    case emqttd_access_control:auth(Client, Password) of
+        ok             -> {ok, false};
+        {ok, IsSuper}  -> {ok, IsSuper};
+        {error, Error} -> {error, Error}
+    end.
+
 %% PUBLISH ACL is cached in process dictionary.
 check_acl(publish, Topic, Client) ->
-    case get({acl, publish, Topic}) of
-        undefined ->
+    IfCache = emqttd:env(cache_acl, true),
+    case {IfCache, get({acl, publish, Topic})} of
+        {true, undefined} ->
             AllowDeny = emqttd_access_control:check_acl(Client, publish, Topic),
             put({acl, publish, Topic}, AllowDeny),
             AllowDeny;
-        AllowDeny ->
-            AllowDeny
+        {true, AllowDeny} ->
+            AllowDeny;
+        {false, _} ->
+            emqttd_access_control:check_acl(Client, publish, Topic)
     end;
 
 check_acl(subscribe, Topic, Client) ->
@@ -409,3 +566,33 @@ check_acl(subscribe, Topic, Client) ->
 sp(true)  -> 1;
 sp(false) -> 0.
 
+%%--------------------------------------------------------------------
+%% The retained flag should be propagated for bridge.
+%%--------------------------------------------------------------------
+
+clean_retain(false, Msg = #mqtt_message{retain = true, headers = Headers}) ->
+    case lists:member(retained, Headers) of
+        true  -> Msg;
+        false -> Msg#mqtt_message{retain = false}
+    end;
+clean_retain(_IsBridge, Msg) ->
+    Msg.
+
+%%--------------------------------------------------------------------
+%% Mount Point
+%%--------------------------------------------------------------------
+
+mount(undefined, Any) ->
+    Any;
+mount(MountPoint, Msg = #mqtt_message{topic = Topic}) ->
+    Msg#mqtt_message{topic = <<MountPoint/binary, Topic/binary>>};
+mount(MountPoint, TopicTable) when is_list(TopicTable) ->
+    [{<<MountPoint/binary, Topic/binary>>, Opts} || {Topic, Opts} <- TopicTable].
+
+unmount(undefined, Any) ->
+    Any;
+unmount(MountPoint, Msg = #mqtt_message{topic = Topic}) ->
+    case catch split_binary(Topic, byte_size(MountPoint)) of
+        {MountPoint, Topic0} -> Msg#mqtt_message{topic = Topic0};
+        _ -> Msg
+    end.

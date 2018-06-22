@@ -1,55 +1,43 @@
-%%%-----------------------------------------------------------------------------
-%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
-%%%
-%%% Permission is hereby granted, free of charge, to any person obtaining a copy
-%%% of this software and associated documentation files (the "Software"), to deal
-%%% in the Software without restriction, including without limitation the rights
-%%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-%%% copies of the Software, and to permit persons to whom the Software is
-%%% furnished to do so, subject to the following conditions:
-%%%
-%%% The above copyright notice and this permission notice shall be included in all
-%%% copies or substantial portions of the Software.
-%%%
-%%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-%%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-%%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-%%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-%%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-%%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-%%% SOFTWARE.
-%%%-----------------------------------------------------------------------------
-%%% @doc
-%%%
-%%% Generate global unique id for mqtt message.
-%%%
-%%% --------------------------------------------------------
-%%% |        Timestamp       |  NodeID + PID  |  Sequence  | 
-%%% |<------- 64bits ------->|<--- 48bits --->|<- 16bits ->|
-%%% --------------------------------------------------------
-%%% 
-%%% 1. Timestamp: erlang:system_time if Erlang >= R18, otherwise os:timestamp
-%%% 2. NodeId:    encode node() to 2 bytes integer
-%%% 3. Pid:       encode pid to 4 bytes integer
-%%% 4. Sequence:  2 bytes sequence in one process
-%%%
-%%% @end
-%%%
-%%% @author Feng Lee <feng@emqtt.io>
-%%%-----------------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Copyright (c) 2013-2018 EMQ Enterprise, Inc. (http://emqtt.io)
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%--------------------------------------------------------------------
+
+%% @doc Generate global unique id for mqtt message.
+%%
+%% --------------------------------------------------------
+%% |        Timestamp       |  NodeID + PID  |  Sequence  | 
+%% |<------- 64bits ------->|<--- 48bits --->|<- 16bits ->|
+%% --------------------------------------------------------
+%% 
+%% 1. Timestamp: erlang:system_time if Erlang >= R18, otherwise os:timestamp
+%% 2. NodeId:    encode node() to 2 bytes integer
+%% 3. Pid:       encode pid to 4 bytes integer
+%% 4. Sequence:  2 bytes sequence in one process
+%%
+%% @end
+
 -module(emqttd_guid).
 
--export([gen/0, new/0, timestamp/1]).
+-export([gen/0, new/0, timestamp/1, to_hexstr/1, from_hexstr/1, to_base62/1, from_base62/1]).
 
 -define(MAX_SEQ, 16#FFFF).
 
--type guid() :: <<_:128>>.
+-type(guid() :: <<_:128>>).
 
-%%------------------------------------------------------------------------------
 %% @doc Generate a global unique id.
-%% @end
-%%------------------------------------------------------------------------------
--spec gen() -> guid().
+-spec(gen() -> guid()).
 gen() ->
     Guid = case get(guid) of
         undefined        -> new();
@@ -60,7 +48,7 @@ gen() ->
 new() ->
     {ts(), npid(), 0}.
 
--spec timestamp(guid()) -> integer().
+-spec(timestamp(guid()) -> integer()).
 timestamp(<<Ts:64, _/binary>>) ->
     Ts.
 
@@ -132,4 +120,16 @@ npid() ->
                     PidByte1:8, PidByte2:8,
                     PidByte3:8, PidByte4:8>>,
     NPid.
+
+to_hexstr(<<I:128>>) ->
+    list_to_binary(integer_to_list(I, 16)).
+
+from_hexstr(S) ->
+    I = list_to_integer(binary_to_list(S), 16), <<I:128>>.
+
+to_base62(<<I:128>>) ->
+    emqttd_base62:encode(I).
+
+from_base62(S) ->
+    I = emqttd_base62:decode(S), <<I:128>>.
 
